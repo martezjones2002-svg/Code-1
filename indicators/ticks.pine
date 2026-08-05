@@ -1,0 +1,85 @@
+//@version=6
+indicator("Ticks", "Ticks", overlay = true)
+
+f_lineStyle(s) =>
+    result = switch s
+        "Dashed" => line.style_dashed
+        "Dotted" => line.style_dotted
+        => line.style_solid
+    result
+
+// ── Tick Lines #1 ──────────────────────────────────────────────
+g1      = "Tick Lines #1"
+show1   = input.bool(true, "Show tick offset lines #1", group = g1)
+ticks1  = input.int(50, "Tick offset #1 (ticks)", minval = 1, group = g1)
+dist1   = input.int(3, "Line Distance #1 (in Bars)", minval = 1, group = g1)
+color1  = input.color(color.purple, "Tick line color #1", group = g1)
+width1  = input.int(1, "Tick line width #1", minval = 1, maxval = 10, group = g1)
+style1s = input.string("Solid", "Tick line style #1", options = ["Solid", "Dashed", "Dotted"], group = g1)
+
+// ── Tick Lines #2 ──────────────────────────────────────────────
+g2      = "Tick Lines #2"
+show2   = input.bool(true, "Show tick offset lines #2", group = g2)
+ticks2  = input.int(75, "Tick offset #2 (ticks)", minval = 1, group = g2)
+dist2   = input.int(3, "Line Distance #2 (in Bars)", minval = 1, group = g2)
+color2  = input.color(color.red, "Tick line color #2", group = g2)
+width2  = input.int(1, "Tick line width #2", minval = 1, maxval = 10, group = g2)
+style2s = input.string("Solid", "Tick line style #2", options = ["Solid", "Dashed", "Dotted"], group = g2)
+
+var line upLine1 = na
+var line dnLine1 = na
+var line upLine2 = na
+var line dnLine2 = na
+
+tick = syminfo.mintick
+
+if barstate.islast
+    // group 1
+    if show1
+        upPrice1 = close + ticks1 * tick
+        dnPrice1 = close - ticks1 * tick
+        x2a = bar_index + dist1
+        if na(upLine1)
+            upLine1 := line.new(bar_index, upPrice1, x2a, upPrice1, color = color1, width = width1, style = f_lineStyle(style1s))
+            dnLine1 := line.new(bar_index, dnPrice1, x2a, dnPrice1, color = color1, width = width1, style = f_lineStyle(style1s))
+        else
+            line.set_xy1(upLine1, bar_index, upPrice1)
+            line.set_xy2(upLine1, x2a, upPrice1)
+            line.set_color(upLine1, color1)
+            line.set_width(upLine1, width1)
+            line.set_style(upLine1, f_lineStyle(style1s))
+            line.set_xy1(dnLine1, bar_index, dnPrice1)
+            line.set_xy2(dnLine1, x2a, dnPrice1)
+            line.set_color(dnLine1, color1)
+            line.set_width(dnLine1, width1)
+            line.set_style(dnLine1, f_lineStyle(style1s))
+    else if not na(upLine1)
+        line.delete(upLine1)
+        line.delete(dnLine1)
+        upLine1 := na
+        dnLine1 := na
+
+    // group 2
+    if show2
+        upPrice2 = close + ticks2 * tick
+        dnPrice2 = close - ticks2 * tick
+        x2b = bar_index + dist2
+        if na(upLine2)
+            upLine2 := line.new(bar_index, upPrice2, x2b, upPrice2, color = color2, width = width2, style = f_lineStyle(style2s))
+            dnLine2 := line.new(bar_index, dnPrice2, x2b, dnPrice2, color = color2, width = width2, style = f_lineStyle(style2s))
+        else
+            line.set_xy1(upLine2, bar_index, upPrice2)
+            line.set_xy2(upLine2, x2b, upPrice2)
+            line.set_color(upLine2, color2)
+            line.set_width(upLine2, width2)
+            line.set_style(upLine2, f_lineStyle(style2s))
+            line.set_xy1(dnLine2, bar_index, dnPrice2)
+            line.set_xy2(dnLine2, x2b, dnPrice2)
+            line.set_color(dnLine2, color2)
+            line.set_width(dnLine2, width2)
+            line.set_style(dnLine2, f_lineStyle(style2s))
+    else if not na(upLine2)
+        line.delete(upLine2)
+        line.delete(dnLine2)
+        upLine2 := na
+        dnLine2 := na
