@@ -24,10 +24,11 @@ inSession  = not na(t)
 newSession = inSession and not inSession[1]
 
 // ── Reversal Zone ──────────────────────────────────────────────
-gZone      = "Reversal Zone"
-sweepTicks = input.int(1, "Min sweep beyond HOD/LOD (ticks)", minval = 0, group = gZone)
-wickRatio  = input.float(50, "Min wick rejection (% of candle range)", minval = 0, maxval = 100, group = gZone) / 100
-pivotLen   = input.int(5, "Swing pivot length (for Advanced EQ)", minval = 1, group = gZone)
+gZone          = "Reversal Zone"
+sweepTicks     = input.int(1, "Min sweep beyond HOD/LOD (ticks)", minval = 0, group = gZone)
+wickRatio      = input.float(50, "Min wick rejection (% of candle range)", minval = 0, maxval = 100, group = gZone) / 100
+pivotLen       = input.int(5, "Swing pivot length (for Advanced EQ)", minval = 1, group = gZone)
+zoneBufferTicks = input.int(40, "Reversal zone buffer beyond swept level (ticks)", minval = 0, group = gZone)
 
 // ── Confluences ──────────────────────────────────────────────
 gConf          = "Confluences"
@@ -43,8 +44,9 @@ useCompleted   = input.bool(true, "Completed Zones (prior zone fully filled)", g
 usePD          = input.bool(true, "PD Array - Premium/Discount (favorable side of range)", group = gConf)
 pdBasis        = input.string("Session Range", "PD Array range basis", options = ["Session Range", "Swing Leg"], group = gConf)
 zoneLookback   = input.int(10, "Nearby lookback (bars)", minval = 1, group = gConf)
+nearTicks      = input.int(10, "Nearby price tolerance (ticks)", minval = 0, group = gConf)
 ceTicks        = input.int(15, "Cz / Advanced EQ tolerance (ticks)", minval = 1, group = gConf)
-minConfluences = input.int(2, "Minimum confluences required", minval = 1, maxval = 10, group = gConf)
+minConfluences = input.int(6, "Minimum confluences required", minval = 1, maxval = 10, group = gConf)
 
 // ── Box Style ──────────────────────────────────────────────
 gStyle    = "Box Style"
@@ -80,23 +82,16 @@ bearOBevent = close[1] > open[1] and close < low[1]
 bullRBevent = barRange > 0 and (lowerWick / barRange) >= wickRatio
 bearRBevent = barRange > 0 and (upperWick / barRange) >= wickRatio
 
-fvgNearBull = ta.barssince(bullFVG) <= zoneLookback
-fvgNearBear = ta.barssince(bearFVG) <= zoneLookback
-irNearBull  = ta.barssince(bearFVG) <= zoneLookback  // opposite gap nearby = potential inversion up
-irNearBear  = ta.barssince(bullFVG) <= zoneLookback  // opposite gap nearby = potential inversion down
-obNearBull  = ta.barssince(bullOBevent) <= zoneLookback
-obNearBear  = ta.barssince(bearOBevent) <= zoneLookback
-rbNearBull  = ta.barssince(bullRBevent) <= zoneLookback
-rbNearBear  = ta.barssince(bearRBevent) <= zoneLookback
-
 // ── Zone Completion Tracking (most recent Fvg/OB/RB per direction) ──────────────────────────────────────────────
 // index 0 = Fvg, 1 = Order Block, 2 = Rejection Block
-var float[] bullTop    = array.new<float>(3, na)
-var float[] bullBottom = array.new<float>(3, na)
-var bool[]  bullActive = array.new<bool>(3, false)
-var float[] bearTop    = array.new<float>(3, na)
-var float[] bearBottom = array.new<float>(3, na)
-var bool[]  bearActive = array.new<bool>(3, false)
+var float[] bullTop      = array.new<float>(3, na)
+var float[] bullBottom   = array.new<float>(3, na)
+var bool[]  bullActive   = array.new<bool>(3, false)
+var int[]   bullEventBar = array.new<int>(3, na)
+var float[] bearTop      = array.new<float>(3, na)
+var float[] bearBottom   = array.new<float>(3, na)
+var bool[]  bearActive   = array.new<bool>(3, false)
+var int[]   bearEventBar = array.new<int>(3, na)
 
 var int lastBullCompleted = na
 var int lastBearCompleted = na
@@ -113,29 +108,48 @@ if bullFVG
     array.set(bullTop, 0, low)
     array.set(bullBottom, 0, high[2])
     array.set(bullActive, 0, true)
+    array.set(bullEventBar, 0, bar_index)
 if bearFVG
     array.set(bearTop, 0, low[2])
     array.set(bearBottom, 0, high)
     array.set(bearActive, 0, true)
+    array.set(bearEventBar, 0, bar_index)
 if bullOBevent
     array.set(bullTop, 1, high[1])
     array.set(bullBottom, 1, low[1])
     array.set(bullActive, 1, true)
+    array.set(bullEventBar, 1, bar_index)
 if bearOBevent
     array.set(bearTop, 1, high[1])
     array.set(bearBottom, 1, low[1])
     array.set(bearActive, 1, true)
+    array.set(bearEventBar, 1, bar_index)
 if bullRBevent
     array.set(bullTop, 2, math.min(open, close))
     array.set(bullBottom, 2, low)
     array.set(bullActive, 2, true)
+    array.set(bullEventBar, 2, bar_index)
 if bearRBevent
     array.set(bearTop, 2, high)
     array.set(bearBottom, 2, math.max(open, close))
     array.set(bearActive, 2, true)
+    array.set(bearEventBar, 2, bar_index)
 
 completedNearBull = not na(lastBullCompleted) and (bar_index - lastBullCompleted) <= zoneLookback
 completedNearBear = not na(lastBearCompleted) and (bar_index - lastBearCompleted) <= zoneLookback
+
+// price-proximity: is the current bar within `tol` ticks of a tracked zone's range?
+f_near(top, bot, tol) =>
+    not na(top) and not na(bot) and low <= top + tol * tick and high >= bot - tol * tick
+
+fvgNearBull = array.get(bullActive, 0) and (bar_index - array.get(bullEventBar, 0)) <= zoneLookback and f_near(array.get(bullTop, 0), array.get(bullBottom, 0), nearTicks)
+fvgNearBear = array.get(bearActive, 0) and (bar_index - array.get(bearEventBar, 0)) <= zoneLookback and f_near(array.get(bearTop, 0), array.get(bearBottom, 0), nearTicks)
+irNearBull  = array.get(bearActive, 0) and (bar_index - array.get(bearEventBar, 0)) <= zoneLookback and f_near(array.get(bearTop, 0), array.get(bearBottom, 0), nearTicks)  // opposite gap nearby = potential inversion up
+irNearBear  = array.get(bullActive, 0) and (bar_index - array.get(bullEventBar, 0)) <= zoneLookback and f_near(array.get(bullTop, 0), array.get(bullBottom, 0), nearTicks)  // opposite gap nearby = potential inversion down
+obNearBull  = array.get(bullActive, 1) and (bar_index - array.get(bullEventBar, 1)) <= zoneLookback and f_near(array.get(bullTop, 1), array.get(bullBottom, 1), nearTicks)
+obNearBear  = array.get(bearActive, 1) and (bar_index - array.get(bearEventBar, 1)) <= zoneLookback and f_near(array.get(bearTop, 1), array.get(bearBottom, 1), nearTicks)
+rbNearBull  = array.get(bullActive, 2) and (bar_index - array.get(bullEventBar, 2)) <= zoneLookback and f_near(array.get(bullTop, 2), array.get(bullBottom, 2), nearTicks)
+rbNearBear  = array.get(bearActive, 2) and (bar_index - array.get(bearEventBar, 2)) <= zoneLookback and f_near(array.get(bearTop, 2), array.get(bearBottom, 2), nearTicks)
 
 // ── Midpoint Confluences ──────────────────────────────────────────────
 sessMid     = (sessHigh + sessLow) / 2
@@ -194,14 +208,14 @@ if array.size(activeBoxes) > 0
 
 if bearSignal
     zTop = high
-    zBot = math.min(open, close)
+    zBot = sessHigh[1] - zoneBufferTicks * tick
     newBox = box.new(bar_index, zTop, bar_index + 1, zBot, border_color = borderCol, bgcolor = bearColor, extend = extend.none)
     array.push(activeBoxes, newBox)
     array.push(boxTops, zTop)
     array.push(boxBottoms, zBot)
 
 if bullSignal
-    zTop = math.max(open, close)
+    zTop = sessLow[1] + zoneBufferTicks * tick
     zBot = low
     newBox = box.new(bar_index, zTop, bar_index + 1, zBot, border_color = borderCol, bgcolor = bullColor, extend = extend.none)
     array.push(activeBoxes, newBox)
