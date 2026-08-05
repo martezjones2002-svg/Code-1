@@ -11,6 +11,8 @@ indicator("NY Reversal Zone", "NY Rev Zone", overlay = true, max_boxes_count = 5
 //   OB  - Order Block    : last opposite candle before a displacement move formed nearby
 //   RB  - Rejection Block: a candle with a long rejection wick formed nearby
 //   Completed Zones      : a tracked Fvg/OB/RB zone was fully filled (closed through) recently
+//   PD Array             : reaction is on the favorable side (discount for longs, premium for shorts)
+//                          of the chosen range's 50%
 
 // ── Session ──────────────────────────────────────────────
 gSess        = "Session"
@@ -38,9 +40,11 @@ useWF          = input.bool(true, "Wf - Wick Rejection (signal candle)", group =
 useOB          = input.bool(true, "Order Block nearby", group = gConf)
 useRB          = input.bool(true, "Rejection Block nearby", group = gConf)
 useCompleted   = input.bool(true, "Completed Zones (prior zone fully filled)", group = gConf)
+usePD          = input.bool(true, "PD Array - Premium/Discount (favorable side of range)", group = gConf)
+pdBasis        = input.string("Session Range", "PD Array range basis", options = ["Session Range", "Swing Leg"], group = gConf)
 zoneLookback   = input.int(10, "Nearby lookback (bars)", minval = 1, group = gConf)
 ceTicks        = input.int(15, "Cz / Advanced EQ tolerance (ticks)", minval = 1, group = gConf)
-minConfluences = input.int(2, "Minimum confluences required", minval = 1, maxval = 9, group = gConf)
+minConfluences = input.int(2, "Minimum confluences required", minval = 1, maxval = 10, group = gConf)
 
 // ── Box Style ──────────────────────────────────────────────
 gStyle    = "Box Style"
@@ -148,6 +152,11 @@ if not na(pl)
 advEqMid       = (lastPivotHigh + lastPivotLow) / 2
 advEqCondition = not na(advEqMid) and math.abs(close - advEqMid) <= ceTicks * tick
 
+// ── PD Array (Premium / Discount) ──────────────────────────────────────────────
+pdMid              = pdBasis == "Session Range" ? sessMid : advEqMid
+discountCondition  = not na(pdMid) and close < pdMid  // favorable for bullish (long) reactions
+premiumCondition   = not na(pdMid) and close > pdMid  // favorable for bearish (short) reactions
+
 wfBear = barRange > 0 and (upperWick / barRange) >= wickRatio
 wfBull = barRange > 0 and (lowerWick / barRange) >= wickRatio
 
@@ -158,8 +167,8 @@ tsBear    = not na(sessHigh[1]) and close < sessHigh[1]
 tsBull    = not na(sessLow[1]) and close > sessLow[1]
 
 // ── Confluence Scoring ──────────────────────────────────────────────
-bearCount = (useTS and tsBear ? 1 : 0) + (useFVG and fvgNearBear ? 1 : 0) + (useIR and irNearBear ? 1 : 0) + (useCZ and czCondition ? 1 : 0) + (useAdvEQ and advEqCondition ? 1 : 0) + (useWF and wfBear ? 1 : 0) + (useOB and obNearBear ? 1 : 0) + (useRB and rbNearBear ? 1 : 0) + (useCompleted and completedNearBear ? 1 : 0)
-bullCount = (useTS and tsBull ? 1 : 0) + (useFVG and fvgNearBull ? 1 : 0) + (useIR and irNearBull ? 1 : 0) + (useCZ and czCondition ? 1 : 0) + (useAdvEQ and advEqCondition ? 1 : 0) + (useWF and wfBull ? 1 : 0) + (useOB and obNearBull ? 1 : 0) + (useRB and rbNearBull ? 1 : 0) + (useCompleted and completedNearBull ? 1 : 0)
+bearCount = (useTS and tsBear ? 1 : 0) + (useFVG and fvgNearBear ? 1 : 0) + (useIR and irNearBear ? 1 : 0) + (useCZ and czCondition ? 1 : 0) + (useAdvEQ and advEqCondition ? 1 : 0) + (useWF and wfBear ? 1 : 0) + (useOB and obNearBear ? 1 : 0) + (useRB and rbNearBear ? 1 : 0) + (useCompleted and completedNearBear ? 1 : 0) + (usePD and premiumCondition ? 1 : 0)
+bullCount = (useTS and tsBull ? 1 : 0) + (useFVG and fvgNearBull ? 1 : 0) + (useIR and irNearBull ? 1 : 0) + (useCZ and czCondition ? 1 : 0) + (useAdvEQ and advEqCondition ? 1 : 0) + (useWF and wfBull ? 1 : 0) + (useOB and obNearBull ? 1 : 0) + (useRB and rbNearBull ? 1 : 0) + (useCompleted and completedNearBull ? 1 : 0) + (usePD and discountCondition ? 1 : 0)
 
 bearSignal = inSession and sweepHigh and bearCount >= minConfluences
 bullSignal = inSession and sweepLow and bullCount >= minConfluences
