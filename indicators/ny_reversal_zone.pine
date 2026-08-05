@@ -2,10 +2,15 @@
 indicator("NY Reversal Zone", "NY Rev Zone", overlay = true, max_boxes_count = 500)
 
 // Confluence shorthand (from trader's journal), interpreted as:
-//   Ts - Turtle Soup   : price sweeps the session high/low then closes back inside it
-//   IR - Inversion FVG : a fair value gap formed nearby recently (inefficiency to react from)
-//   Cz - Cons. Encroach: reaction is near the 50% midpoint of the session's high/low range
-//   Wf - Wick Fill      : the signal candle has a long rejection wick relative to its range
+//   Ts  - Turtle Soup    : price sweeps the session high/low then closes back inside it
+//   Fvg - Fair Value Gap : a 3-candle gap formed nearby (inefficiency to react from)
+//   IR  - Inversion FVG  : an opposite-direction gap formed nearby (now trading through/inverting it)
+//   Cz  - Cons. Encroach : reaction is near the 50% midpoint of the session's high/low range
+//   AdvEQ (SMC)          : reaction is near the 50% midpoint of the most recent swing leg
+//   Wf  - Wick Rejection : the signal candle itself has a long rejection wick
+//   OB  - Order Block    : last opposite candle before a displacement move formed nearby
+//   RB  - Rejection Block: a candle with a long rejection wick formed nearby
+//   Completed Zones      : a tracked Fvg/OB/RB zone was fully filled (closed through) recently
 
 // ── Session ──────────────────────────────────────────────
 gSess        = "Session"
@@ -20,16 +25,22 @@ newSession = inSession and not inSession[1]
 gZone      = "Reversal Zone"
 sweepTicks = input.int(1, "Min sweep beyond HOD/LOD (ticks)", minval = 0, group = gZone)
 wickRatio  = input.float(50, "Min wick rejection (% of candle range)", minval = 0, maxval = 100, group = gZone) / 100
+pivotLen   = input.int(5, "Swing pivot length (for Advanced EQ)", minval = 1, group = gZone)
 
 // ── Confluences ──────────────────────────────────────────────
 gConf          = "Confluences"
 useTS          = input.bool(true, "Ts - Turtle Soup (sweep + close back inside)", group = gConf)
-useIR          = input.bool(true, "IR - Inversion FVG (fair value gap nearby)", group = gConf)
-useCZ          = input.bool(true, "Cz - Consequent Encroachment (near 50% of range)", group = gConf)
-useWF          = input.bool(true, "Wf - Wick Rejection", group = gConf)
-irLookback     = input.int(10, "IR lookback (bars)", minval = 1, group = gConf)
-ceTicks        = input.int(15, "Cz tolerance (ticks around 50%)", minval = 1, group = gConf)
-minConfluences = input.int(2, "Minimum confluences required", minval = 1, maxval = 4, group = gConf)
+useFVG         = input.bool(true, "Fvg - Fair Value Gap nearby", group = gConf)
+useIR          = input.bool(true, "IR - Inversion FVG (opposite gap nearby)", group = gConf)
+useCZ          = input.bool(true, "Cz - Consequent Encroachment (session 50%)", group = gConf)
+useAdvEQ       = input.bool(true, "Advanced EQ (SMC) - swing leg 50%", group = gConf)
+useWF          = input.bool(true, "Wf - Wick Rejection (signal candle)", group = gConf)
+useOB          = input.bool(true, "Order Block nearby", group = gConf)
+useRB          = input.bool(true, "Rejection Block nearby", group = gConf)
+useCompleted   = input.bool(true, "Completed Zones (prior zone fully filled)", group = gConf)
+zoneLookback   = input.int(10, "Nearby lookback (bars)", minval = 1, group = gConf)
+ceTicks        = input.int(15, "Cz / Advanced EQ tolerance (ticks)", minval = 1, group = gConf)
+minConfluences = input.int(2, "Minimum confluences required", minval = 1, maxval = 9, group = gConf)
 
 // ── Box Style ──────────────────────────────────────────────
 gStyle    = "Box Style"
@@ -50,28 +61,105 @@ else if inSession
     sessHigh := math.max(sessHigh, high)
     sessLow  := math.min(sessLow, low)
 
-// ── Confluence Conditions ──────────────────────────────────────────────
-barRange = high - low
+// ── Basic Candle Measurements ──────────────────────────────────────────────
+barRange  = high - low
+upperWick = high - math.max(open, close)
+lowerWick = math.min(open, close) - low
 
+// ── Fvg / Order Block / Rejection Block Events ──────────────────────────────────────────────
 bullFVG = high[2] < low
 bearFVG = low[2] > high
-irCondition = (ta.barssince(bullFVG) <= irLookback) or (ta.barssince(bearFVG) <= irLookback)
 
+bullOBevent = close[1] < open[1] and close > high[1]
+bearOBevent = close[1] > open[1] and close < low[1]
+
+bullRBevent = barRange > 0 and (lowerWick / barRange) >= wickRatio
+bearRBevent = barRange > 0 and (upperWick / barRange) >= wickRatio
+
+fvgNearBull = ta.barssince(bullFVG) <= zoneLookback
+fvgNearBear = ta.barssince(bearFVG) <= zoneLookback
+irNearBull  = ta.barssince(bearFVG) <= zoneLookback  // opposite gap nearby = potential inversion up
+irNearBear  = ta.barssince(bullFVG) <= zoneLookback  // opposite gap nearby = potential inversion down
+obNearBull  = ta.barssince(bullOBevent) <= zoneLookback
+obNearBear  = ta.barssince(bearOBevent) <= zoneLookback
+rbNearBull  = ta.barssince(bullRBevent) <= zoneLookback
+rbNearBear  = ta.barssince(bearRBevent) <= zoneLookback
+
+// ── Zone Completion Tracking (most recent Fvg/OB/RB per direction) ──────────────────────────────────────────────
+// index 0 = Fvg, 1 = Order Block, 2 = Rejection Block
+var float[] bullTop    = array.new<float>(3, na)
+var float[] bullBottom = array.new<float>(3, na)
+var bool[]  bullActive = array.new<bool>(3, false)
+var float[] bearTop    = array.new<float>(3, na)
+var float[] bearBottom = array.new<float>(3, na)
+var bool[]  bearActive = array.new<bool>(3, false)
+
+var int lastBullCompleted = na
+var int lastBearCompleted = na
+
+for idx = 0 to 2
+    if array.get(bullActive, idx) and close < array.get(bullBottom, idx)
+        array.set(bullActive, idx, false)
+        lastBullCompleted := bar_index
+    if array.get(bearActive, idx) and close > array.get(bearTop, idx)
+        array.set(bearActive, idx, false)
+        lastBearCompleted := bar_index
+
+if bullFVG
+    array.set(bullTop, 0, low)
+    array.set(bullBottom, 0, high[2])
+    array.set(bullActive, 0, true)
+if bearFVG
+    array.set(bearTop, 0, low[2])
+    array.set(bearBottom, 0, high)
+    array.set(bearActive, 0, true)
+if bullOBevent
+    array.set(bullTop, 1, high[1])
+    array.set(bullBottom, 1, low[1])
+    array.set(bullActive, 1, true)
+if bearOBevent
+    array.set(bearTop, 1, high[1])
+    array.set(bearBottom, 1, low[1])
+    array.set(bearActive, 1, true)
+if bullRBevent
+    array.set(bullTop, 2, math.min(open, close))
+    array.set(bullBottom, 2, low)
+    array.set(bullActive, 2, true)
+if bearRBevent
+    array.set(bearTop, 2, high)
+    array.set(bearBottom, 2, math.max(open, close))
+    array.set(bearActive, 2, true)
+
+completedNearBull = not na(lastBullCompleted) and (bar_index - lastBullCompleted) <= zoneLookback
+completedNearBear = not na(lastBearCompleted) and (bar_index - lastBearCompleted) <= zoneLookback
+
+// ── Midpoint Confluences ──────────────────────────────────────────────
 sessMid     = (sessHigh + sessLow) / 2
 czCondition = not na(sessMid) and math.abs(close - sessMid) <= ceTicks * tick
 
-upperWick = high - math.max(open, close)
-lowerWick = math.min(open, close) - low
-wfBear    = barRange > 0 and (upperWick / barRange) >= wickRatio
-wfBull    = barRange > 0 and (lowerWick / barRange) >= wickRatio
+ph = ta.pivothigh(pivotLen, pivotLen)
+pl = ta.pivotlow(pivotLen, pivotLen)
+var float lastPivotHigh = na
+var float lastPivotLow  = na
+if not na(ph)
+    lastPivotHigh := ph
+if not na(pl)
+    lastPivotLow := pl
+advEqMid       = (lastPivotHigh + lastPivotLow) / 2
+advEqCondition = not na(advEqMid) and math.abs(close - advEqMid) <= ceTicks * tick
 
+wfBear = barRange > 0 and (upperWick / barRange) >= wickRatio
+wfBull = barRange > 0 and (lowerWick / barRange) >= wickRatio
+
+// ── Sweep / Turtle Soup ──────────────────────────────────────────────
 sweepHigh = not na(sessHigh[1]) and high >= sessHigh[1] + sweepTicks * tick
 sweepLow  = not na(sessLow[1]) and low <= sessLow[1] - sweepTicks * tick
 tsBear    = not na(sessHigh[1]) and close < sessHigh[1]
 tsBull    = not na(sessLow[1]) and close > sessLow[1]
 
-bearCount = (useTS and tsBear ? 1 : 0) + (useIR and irCondition ? 1 : 0) + (useCZ and czCondition ? 1 : 0) + (useWF and wfBear ? 1 : 0)
-bullCount = (useTS and tsBull ? 1 : 0) + (useIR and irCondition ? 1 : 0) + (useCZ and czCondition ? 1 : 0) + (useWF and wfBull ? 1 : 0)
+// ── Confluence Scoring ──────────────────────────────────────────────
+bearCount = (useTS and tsBear ? 1 : 0) + (useFVG and fvgNearBear ? 1 : 0) + (useIR and irNearBear ? 1 : 0) + (useCZ and czCondition ? 1 : 0) + (useAdvEQ and advEqCondition ? 1 : 0) + (useWF and wfBear ? 1 : 0) + (useOB and obNearBear ? 1 : 0) + (useRB and rbNearBear ? 1 : 0) + (useCompleted and completedNearBear ? 1 : 0)
+bullCount = (useTS and tsBull ? 1 : 0) + (useFVG and fvgNearBull ? 1 : 0) + (useIR and irNearBull ? 1 : 0) + (useCZ and czCondition ? 1 : 0) + (useAdvEQ and advEqCondition ? 1 : 0) + (useWF and wfBull ? 1 : 0) + (useOB and obNearBull ? 1 : 0) + (useRB and rbNearBull ? 1 : 0) + (useCompleted and completedNearBull ? 1 : 0)
 
 bearSignal = inSession and sweepHigh and bearCount >= minConfluences
 bullSignal = inSession and sweepLow and bullCount >= minConfluences
