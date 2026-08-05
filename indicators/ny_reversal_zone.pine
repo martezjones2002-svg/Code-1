@@ -1,0 +1,115 @@
+//@version=6
+indicator("NY Reversal Zone", "NY Rev Zone", overlay = true, max_boxes_count = 500)
+
+// Confluence shorthand (from trader's journal), interpreted as:
+//   Ts - Turtle Soup   : price sweeps the session high/low then closes back inside it
+//   IR - Inversion FVG : a fair value gap formed nearby recently (inefficiency to react from)
+//   Cz - Cons. Encroach: reaction is near the 50% midpoint of the session's high/low range
+//   Wf - Wick Fill      : the signal candle has a long rejection wick relative to its range
+
+// ── Session ──────────────────────────────────────────────
+gSess        = "Session"
+sessionInput = input.session("0930-1600", "New York Session", group = gSess)
+sessionTZ    = "America/New_York"
+
+t          = time(timeframe.period, sessionInput, sessionTZ)
+inSession  = not na(t)
+newSession = inSession and not inSession[1]
+
+// ── Reversal Zone ──────────────────────────────────────────────
+gZone      = "Reversal Zone"
+sweepTicks = input.int(1, "Min sweep beyond HOD/LOD (ticks)", minval = 0, group = gZone)
+wickRatio  = input.float(50, "Min wick rejection (% of candle range)", minval = 0, maxval = 100, group = gZone) / 100
+
+// ── Confluences ──────────────────────────────────────────────
+gConf          = "Confluences"
+useTS          = input.bool(true, "Ts - Turtle Soup (sweep + close back inside)", group = gConf)
+useIR          = input.bool(true, "IR - Inversion FVG (fair value gap nearby)", group = gConf)
+useCZ          = input.bool(true, "Cz - Consequent Encroachment (near 50% of range)", group = gConf)
+useWF          = input.bool(true, "Wf - Wick Rejection", group = gConf)
+irLookback     = input.int(10, "IR lookback (bars)", minval = 1, group = gConf)
+ceTicks        = input.int(15, "Cz tolerance (ticks around 50%)", minval = 1, group = gConf)
+minConfluences = input.int(2, "Minimum confluences required", minval = 1, maxval = 4, group = gConf)
+
+// ── Box Style ──────────────────────────────────────────────
+gStyle    = "Box Style"
+bullColor = input.color(color.new(color.teal, 80), "Bullish zone color", group = gStyle)
+bearColor = input.color(color.new(color.red, 80), "Bearish zone color", group = gStyle)
+borderCol = input.color(color.new(color.white, 60), "Border color", group = gStyle)
+
+tick = syminfo.mintick
+
+// ── Session High / Low ──────────────────────────────────────────────
+var float sessHigh = na
+var float sessLow  = na
+
+if newSession
+    sessHigh := high
+    sessLow  := low
+else if inSession
+    sessHigh := math.max(sessHigh, high)
+    sessLow  := math.min(sessLow, low)
+
+// ── Confluence Conditions ──────────────────────────────────────────────
+barRange = high - low
+
+bullFVG = high[2] < low
+bearFVG = low[2] > high
+irCondition = (ta.barssince(bullFVG) <= irLookback) or (ta.barssince(bearFVG) <= irLookback)
+
+sessMid     = (sessHigh + sessLow) / 2
+czCondition = not na(sessMid) and math.abs(close - sessMid) <= ceTicks * tick
+
+upperWick = high - math.max(open, close)
+lowerWick = math.min(open, close) - low
+wfBear    = barRange > 0 and (upperWick / barRange) >= wickRatio
+wfBull    = barRange > 0 and (lowerWick / barRange) >= wickRatio
+
+sweepHigh = not na(sessHigh[1]) and high >= sessHigh[1] + sweepTicks * tick
+sweepLow  = not na(sessLow[1]) and low <= sessLow[1] - sweepTicks * tick
+tsBear    = not na(sessHigh[1]) and close < sessHigh[1]
+tsBull    = not na(sessLow[1]) and close > sessLow[1]
+
+bearCount = (useTS and tsBear ? 1 : 0) + (useIR and irCondition ? 1 : 0) + (useCZ and czCondition ? 1 : 0) + (useWF and wfBear ? 1 : 0)
+bullCount = (useTS and tsBull ? 1 : 0) + (useIR and irCondition ? 1 : 0) + (useCZ and czCondition ? 1 : 0) + (useWF and wfBull ? 1 : 0)
+
+bearSignal = inSession and sweepHigh and bearCount >= minConfluences
+bullSignal = inSession and sweepLow and bullCount >= minConfluences
+
+// ── Zone Boxes ──────────────────────────────────────────────
+var box[]   activeBoxes  = array.new<box>()
+var float[] boxTops      = array.new<float>()
+var float[] boxBottoms   = array.new<float>()
+
+if array.size(activeBoxes) > 0
+    for i = array.size(activeBoxes) - 1 to 0
+        b      = array.get(activeBoxes, i)
+        top    = array.get(boxTops, i)
+        bottom = array.get(boxBottoms, i)
+        tapped = low <= top and high >= bottom
+        if tapped
+            box.delete(b)
+            array.remove(activeBoxes, i)
+            array.remove(boxTops, i)
+            array.remove(boxBottoms, i)
+        else
+            box.set_right(b, bar_index + 1)
+
+if bearSignal
+    zTop = high
+    zBot = math.min(open, close)
+    newBox = box.new(bar_index, zTop, bar_index + 1, zBot, border_color = borderCol, bgcolor = bearColor, extend = extend.none)
+    array.push(activeBoxes, newBox)
+    array.push(boxTops, zTop)
+    array.push(boxBottoms, zBot)
+
+if bullSignal
+    zTop = math.max(open, close)
+    zBot = low
+    newBox = box.new(bar_index, zTop, bar_index + 1, zBot, border_color = borderCol, bgcolor = bullColor, extend = extend.none)
+    array.push(activeBoxes, newBox)
+    array.push(boxTops, zTop)
+    array.push(boxBottoms, zBot)
+
+alertcondition(bearSignal, "Bearish Reversal Zone", "NY Reversal Zone: bearish zone formed at HOD sweep")
+alertcondition(bullSignal, "Bullish Reversal Zone", "NY Reversal Zone: bullish zone formed at LOD sweep")
