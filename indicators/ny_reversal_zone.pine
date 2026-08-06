@@ -13,6 +13,10 @@ indicator("NY Reversal Zone", "NY Rev Zone", overlay = true, max_boxes_count = 5
 //   Completed Zones      : a tracked Fvg/OB/RB zone was fully filled (closed through) recently
 //   PD Array             : reaction is on the favorable side (discount for longs, premium for shorts)
 //                          of the chosen range's 50%
+//   MMM  - Market Maker Model : a tight accumulation range formed right before the sweep
+//                               (accumulation -> manipulation/sweep -> expected distribution)
+//   STDV - Standard Deviation : reaction is near 1x the swing leg's range projected beyond it
+//   OTE  - Optimal Trade Entry: reaction is in the 61.8%-79% retracement zone of the swing leg
 //
 // A box is drawn the moment a Fvg/Order Block/Rejection Block forms (not
 // after price has already reversed away from it) if enough of the above
@@ -50,11 +54,16 @@ useOB          = input.bool(true, "Order Block nearby", group = gConf)
 useRB          = input.bool(true, "Rejection Block nearby", group = gConf)
 useCompleted   = input.bool(true, "Completed Zones (prior zone fully filled)", group = gConf)
 usePD          = input.bool(true, "PD Array - Premium/Discount (favorable side of range)", group = gConf)
+useMMM         = input.bool(true, "MMM - Market Maker Model (accumulation before sweep)", group = gConf)
+useSTDV        = input.bool(true, "STDV - near 1 standard deviation extension", group = gConf)
+useOTE         = input.bool(true, "OTE - Optimal Trade Entry (61.8%-79% retracement)", group = gConf)
 pdBasis        = input.string("Session Range", "PD Array range basis", options = ["Session Range", "Swing Leg"], group = gConf)
+accumBars      = input.int(10, "MMM accumulation lookback (bars)", minval = 2, group = gConf)
+accumRatio     = input.float(2.0, "MMM max accumulation range (x sweep bar range)", minval = 1.0, group = gConf)
 zoneLookback   = input.int(10, "Nearby lookback (bars)", minval = 1, group = gConf)
 nearTicks      = input.int(10, "Nearby price tolerance (ticks)", minval = 0, group = gConf)
-ceTicks        = input.int(15, "Cz / Advanced EQ tolerance (ticks)", minval = 1, group = gConf)
-minConfluences = input.int(4, "Minimum confluences required", minval = 1, maxval = 10, group = gConf)
+ceTicks        = input.int(15, "Cz / Advanced EQ / STDV tolerance (ticks)", minval = 1, group = gConf)
+minConfluences = input.int(4, "Minimum confluences required", minval = 1, maxval = 13, group = gConf)
 
 // ── Box Style ──────────────────────────────────────────────
 gStyle    = "Box Style"
@@ -184,6 +193,25 @@ if not na(pl)
 advEqMid       = (lastPivotHigh + lastPivotLow) / 2
 advEqCondition = not na(advEqMid) and math.abs(close - advEqMid) <= ceTicks * tick
 
+// ── STDV (1 standard deviation extension beyond the swing leg) ──────────────────────────────────────────────
+pivotRange     = lastPivotHigh - lastPivotLow
+stdvBearLevel  = lastPivotHigh + pivotRange
+stdvBullLevel  = lastPivotLow - pivotRange
+stdvBearCondition = not na(stdvBearLevel) and math.abs(close - stdvBearLevel) <= ceTicks * tick
+stdvBullCondition = not na(stdvBullLevel) and math.abs(close - stdvBullLevel) <= ceTicks * tick
+
+// ── OTE (61.8%-79% retracement of the swing leg) ──────────────────────────────────────────────
+oteBearBot = lastPivotLow + pivotRange * 0.618
+oteBearTop = lastPivotLow + pivotRange * 0.79
+oteBullTop = lastPivotHigh - pivotRange * 0.618
+oteBullBot = lastPivotHigh - pivotRange * 0.79
+oteBearCondition = not na(oteBearTop) and close >= oteBearBot and close <= oteBearTop
+oteBullCondition = not na(oteBullTop) and close >= oteBullBot and close <= oteBullTop
+
+// ── MMM (tight accumulation range right before the sweep) ──────────────────────────────────────────────
+accumRange   = ta.highest(high, accumBars)[1] - ta.lowest(low, accumBars)[1]
+mmmCondition = accumRange > 0 and barRange > 0 and accumRange <= accumRatio * barRange
+
 // ── PD Array (Premium / Discount) ──────────────────────────────────────────────
 pdMid              = pdBasis == "Session Range" ? sessMid : advEqMid
 discountCondition  = not na(pdMid) and close < pdMid  // favorable for bullish (long) reactions
@@ -231,8 +259,8 @@ if bullTrigger
     pendingBullBar := na
 
 // ── Confluence Scoring ──────────────────────────────────────────────
-bearCount = (useTS and tsBear ? 1 : 0) + (useFVG and fvgNearBear ? 1 : 0) + (useIR and irNearBear ? 1 : 0) + (useCZ and czCondition ? 1 : 0) + (useAdvEQ and advEqCondition ? 1 : 0) + (useWF and wfBear ? 1 : 0) + (useOB and obNearBear ? 1 : 0) + (useRB and rbNearBear ? 1 : 0) + (useCompleted and completedNearBear ? 1 : 0) + (usePD and premiumCondition ? 1 : 0)
-bullCount = (useTS and tsBull ? 1 : 0) + (useFVG and fvgNearBull ? 1 : 0) + (useIR and irNearBull ? 1 : 0) + (useCZ and czCondition ? 1 : 0) + (useAdvEQ and advEqCondition ? 1 : 0) + (useWF and wfBull ? 1 : 0) + (useOB and obNearBull ? 1 : 0) + (useRB and rbNearBull ? 1 : 0) + (useCompleted and completedNearBull ? 1 : 0) + (usePD and discountCondition ? 1 : 0)
+bearCount = (useTS and tsBear ? 1 : 0) + (useFVG and fvgNearBear ? 1 : 0) + (useIR and irNearBear ? 1 : 0) + (useCZ and czCondition ? 1 : 0) + (useAdvEQ and advEqCondition ? 1 : 0) + (useWF and wfBear ? 1 : 0) + (useOB and obNearBear ? 1 : 0) + (useRB and rbNearBear ? 1 : 0) + (useCompleted and completedNearBear ? 1 : 0) + (usePD and premiumCondition ? 1 : 0) + (useMMM and mmmCondition ? 1 : 0) + (useSTDV and stdvBearCondition ? 1 : 0) + (useOTE and oteBearCondition ? 1 : 0)
+bullCount = (useTS and tsBull ? 1 : 0) + (useFVG and fvgNearBull ? 1 : 0) + (useIR and irNearBull ? 1 : 0) + (useCZ and czCondition ? 1 : 0) + (useAdvEQ and advEqCondition ? 1 : 0) + (useWF and wfBull ? 1 : 0) + (useOB and obNearBull ? 1 : 0) + (useRB and rbNearBull ? 1 : 0) + (useCompleted and completedNearBull ? 1 : 0) + (usePD and discountCondition ? 1 : 0) + (useMMM and mmmCondition ? 1 : 0) + (useSTDV and stdvBullCondition ? 1 : 0) + (useOTE and oteBullCondition ? 1 : 0)
 
 // ── Zone Formation (the box appears here, not after a confirmed reversal) ──────────────────────────────────────────────
 // Require the pattern to actually be at a real reversal point - it must
