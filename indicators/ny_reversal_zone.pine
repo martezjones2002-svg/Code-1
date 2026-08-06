@@ -62,6 +62,16 @@ bullColor = input.color(color.new(color.teal, 80), "Bullish zone color", group =
 bearColor = input.color(color.new(color.red, 80), "Bearish zone color", group = gStyle)
 borderCol = input.color(color.new(color.white, 60), "Border color", group = gStyle)
 
+// ── Tap Outcome Stats ──────────────────────────────────────────────
+// A tap isn't a guaranteed reversal - this tracks, for every zone that gets
+// tapped, whether price actually moved away by a meaningful amount within a
+// following window, or just kept going (continuation/false signal), and
+// keeps a running win rate instead of you having to count by hand.
+gStats        = "Stats"
+outcomeBars   = input.int(10, "Bars to judge tap outcome", minval = 1, group = gStats)
+reversalTicks = input.int(20, "Min move away from zone to count as reversal (ticks)", minval = 1, group = gStats)
+showStats     = input.bool(true, "Show win-rate table", group = gStats)
+
 tick = syminfo.mintick
 
 // ── Session High / Low ──────────────────────────────────────────────
@@ -241,6 +251,18 @@ var box   bullZoneBox = na
 var float bullZoneTop = na
 var float bullZoneBot = na
 
+var int bearZonesFormed = 0
+var int bullZonesFormed = 0
+var int bearTaps        = 0
+var int bullTaps        = 0
+var int bearReversals   = 0
+var int bullReversals   = 0
+
+var int   pendingBearOutcomeBar   = na
+var float pendingBearOutcomeLevel = na
+var int   pendingBullOutcomeBar   = na
+var float pendingBullOutcomeLevel = na
+
 // ── Zone Boxes (one active box per direction; replaced only once tapped) ──────────────────────────────────────────────
 // Fixed width, both edges shift forward together each bar - it slides
 // across the chart at a constant size instead of stretching wider forever.
@@ -250,6 +272,12 @@ if not na(bearZoneBox)
     if low <= bearZoneTop and high >= bearZoneBot
         box.delete(bearZoneBox)
         bearZoneBox := na
+        if not na(pendingBearOutcomeBar)  // resolve an earlier still-pending tap early using current price
+            if close <= pendingBearOutcomeLevel - reversalTicks * tick
+                bearReversals := bearReversals + 1
+        bearTaps                := bearTaps + 1
+        pendingBearOutcomeBar   := bar_index
+        pendingBearOutcomeLevel := bearZoneBot
     else
         box.set_left(bearZoneBox, bar_index - boxWidthBars + 1)
         box.set_right(bearZoneBox, bar_index + 1)
@@ -258,9 +286,25 @@ if not na(bullZoneBox)
     if low <= bullZoneTop and high >= bullZoneBot
         box.delete(bullZoneBox)
         bullZoneBox := na
+        if not na(pendingBullOutcomeBar)
+            if close >= pendingBullOutcomeLevel + reversalTicks * tick
+                bullReversals := bullReversals + 1
+        bullTaps                := bullTaps + 1
+        pendingBullOutcomeBar   := bar_index
+        pendingBullOutcomeLevel := bullZoneTop
     else
         box.set_left(bullZoneBox, bar_index - boxWidthBars + 1)
         box.set_right(bullZoneBox, bar_index + 1)
+
+// judge a pending tap's outcome once outcomeBars have passed
+if not na(pendingBearOutcomeBar) and (bar_index - pendingBearOutcomeBar) >= outcomeBars
+    if close <= pendingBearOutcomeLevel - reversalTicks * tick
+        bearReversals := bearReversals + 1
+    pendingBearOutcomeBar := na
+if not na(pendingBullOutcomeBar) and (bar_index - pendingBullOutcomeBar) >= outcomeBars
+    if close >= pendingBullOutcomeLevel + reversalTicks * tick
+        bullReversals := bullReversals + 1
+    pendingBullOutcomeBar := na
 
 bearZoneSignal = inSession and newBearZoneEvent and bearCount >= minConfluences and na(bearZoneBox)
 bullZoneSignal = inSession and newBullZoneEvent and bullCount >= minConfluences and na(bullZoneBox)
@@ -273,11 +317,32 @@ if bearZoneSignal
     bearZoneTop := bearEventTop
     bearZoneBot := bearEventBot
     bearZoneBox := box.new(bar_index - boxWidthBars + 1, bearZoneTop, bar_index + 1, bearZoneBot, border_color = borderCol, bgcolor = bearColor, extend = extend.none)
+    bearZonesFormed := bearZonesFormed + 1
 
 if bullZoneSignal
     bullZoneTop := bullEventTop
     bullZoneBot := bullEventBot
     bullZoneBox := box.new(bar_index - boxWidthBars + 1, bullZoneTop, bar_index + 1, bullZoneBot, border_color = borderCol, bgcolor = bullColor, extend = extend.none)
+    bullZonesFormed := bullZonesFormed + 1
 
 alertcondition(bearSignal, "Bearish Reversal Zone", "NY Reversal Zone: bearish zone formed")
 alertcondition(bullSignal, "Bullish Reversal Zone", "NY Reversal Zone: bullish zone formed")
+
+// ── Stats Table ──────────────────────────────────────────────
+var table statsTable = table.new(position.top_right, 2, 4, bgcolor = color.new(color.black, 20), border_width = 1, border_color = color.gray)
+
+if showStats and barstate.islast
+    bearWinPct  = bearTaps > 0 ? (bearReversals / bearTaps) * 100 : na
+    bullWinPct  = bullTaps > 0 ? (bullReversals / bullTaps) * 100 : na
+    totalTaps   = bearTaps + bullTaps
+    totalRev    = bearReversals + bullReversals
+    totalWinPct = totalTaps > 0 ? (totalRev / totalTaps) * 100 : na
+
+    table.cell(statsTable, 0, 0, "Zone", text_color = color.white, bgcolor = color.new(color.gray, 40))
+    table.cell(statsTable, 1, 0, "Formed/Tap/Win%", text_color = color.white, bgcolor = color.new(color.gray, 40))
+    table.cell(statsTable, 0, 1, "Bear", text_color = color.white)
+    table.cell(statsTable, 1, 1, str.tostring(bearZonesFormed) + " / " + str.tostring(bearTaps) + " / " + (na(bearWinPct) ? "-" : str.tostring(bearWinPct, "#.0") + "%"), text_color = color.white)
+    table.cell(statsTable, 0, 2, "Bull", text_color = color.white)
+    table.cell(statsTable, 1, 2, str.tostring(bullZonesFormed) + " / " + str.tostring(bullTaps) + " / " + (na(bullWinPct) ? "-" : str.tostring(bullWinPct, "#.0") + "%"), text_color = color.white)
+    table.cell(statsTable, 0, 3, "Total", text_color = color.white)
+    table.cell(statsTable, 1, 3, str.tostring(totalTaps) + " taps / " + (na(totalWinPct) ? "-" : str.tostring(totalWinPct, "#.0") + "%"), text_color = color.white)
