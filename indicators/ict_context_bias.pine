@@ -43,7 +43,8 @@ nypmSession  = input.session("1330-1600", "NY PM Session Time", group = gSess)
 
 // ── Range Settlement (manual - formula not disclosed) ──────────────────────────────────────────────
 gRS             = "Range Settlement (manual entry)"
-rsPrice         = input.float(na, "Today's RS Price (from your RS indicator, blank = off)", group = gRS)
+rsPriceInput    = input.float(0.0, "Today's RS Price (from your RS indicator, 0 = off)", group = gRS)
+rsPrice         = rsPriceInput > 0 ? rsPriceInput : na
 showRSQuadrants = input.bool(true, "Show RS Quadrants (9:30 Open -> RS)", group = gRS)
 
 // ── Style ──────────────────────────────────────────────
