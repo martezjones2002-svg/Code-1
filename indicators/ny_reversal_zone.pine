@@ -41,6 +41,7 @@ wickRatio      = input.float(50, "Min wick rejection (% of candle range)", minva
 pivotLen       = input.int(5, "Swing pivot length (for Advanced EQ)", minval = 1, group = gZone)
 confirmBars    = input.int(3, "Turtle Soup confirmation window (bars after sweep)", minval = 1, group = gZone)
 boxWidthBars   = input.int(6, "Zone box width (bars)", minval = 1, group = gZone)
+sweepLookback  = input.int(120, "Sweep reference lookback (bars, includes pre-market)", minval = 10, group = gZone)
 
 // ── Confluences ──────────────────────────────────────────────
 gConf          = "Confluences"
@@ -225,24 +226,24 @@ wfBull = barRange > 0 and (lowerWick / barRange) >= wickRatio
 // `confirmBars` bars (price fails to extend and closes back through the
 // prior bar's high/low) rather than requiring both to happen on one candle -
 // real tops/bottoms often take a bar or two to actually reject.
-sweepHigh = not na(sessHigh[1]) and high >= sessHigh[1] + sweepTicks * tick
-sweepLow  = not na(sessLow[1]) and low <= sessLow[1] - sweepTicks * tick
+//
+// The prior high/low being swept is measured over a rolling lookback that
+// spans pre-market too, not just the current 09:30-16:00 session's own
+// range - otherwise the session's very first bars have no "prior session
+// high/low" yet to sweep, and the actual open-of-day reversal (often a
+// sweep of the overnight low/high) gets structurally excluded.
+priorHigh = ta.highest(high, sweepLookback)[1]
+priorLow  = ta.lowest(low, sweepLookback)[1]
+sweepHigh = not na(priorHigh) and high >= priorHigh + sweepTicks * tick
+sweepLow  = not na(priorLow) and low <= priorLow - sweepTicks * tick
 
-var int   pendingBearBar   = na
-var float pendingBearWick  = na
-var float pendingBearLevel = na
-var int   pendingBullBar   = na
-var float pendingBullWick  = na
-var float pendingBullLevel = na
+var int pendingBearBar = na
+var int pendingBullBar = na
 
 if sweepHigh
-    pendingBearBar   := bar_index
-    pendingBearWick  := high
-    pendingBearLevel := sessHigh[1]
+    pendingBearBar := bar_index
 if sweepLow
-    pendingBullBar   := bar_index
-    pendingBullWick  := low
-    pendingBullLevel := sessLow[1]
+    pendingBullBar := bar_index
 
 bearPending = not na(pendingBearBar) and (bar_index - pendingBearBar) <= confirmBars
 bullPending = not na(pendingBullBar) and (bar_index - pendingBullBar) <= confirmBars
