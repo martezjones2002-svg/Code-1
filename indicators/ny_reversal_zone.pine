@@ -235,8 +235,12 @@ bearCount = (useTS and tsBear ? 1 : 0) + (useFVG and fvgNearBear ? 1 : 0) + (use
 bullCount = (useTS and tsBull ? 1 : 0) + (useFVG and fvgNearBull ? 1 : 0) + (useIR and irNearBull ? 1 : 0) + (useCZ and czCondition ? 1 : 0) + (useAdvEQ and advEqCondition ? 1 : 0) + (useWF and wfBull ? 1 : 0) + (useOB and obNearBull ? 1 : 0) + (useRB and rbNearBull ? 1 : 0) + (useCompleted and completedNearBull ? 1 : 0) + (usePD and discountCondition ? 1 : 0)
 
 // ── Zone Formation (the box appears here, not after a confirmed reversal) ──────────────────────────────────────────────
-newBearZoneEvent = bearOBevent or bearFVG or bearRBevent
-newBullZoneEvent = bullOBevent or bullFVG or bullRBevent
+// Require the pattern to actually be at a real reversal point - it must
+// form at/within `confirmBars` bars of an actual sweep of the prior
+// session high/low, not just anywhere an OB/Fvg/RB candle happens to occur
+// mid-trend.
+newBearZoneEvent = (bearOBevent or bearFVG or bearRBevent) and bearPending
+newBullZoneEvent = (bullOBevent or bullFVG or bullRBevent) and bullPending
 
 // priority when more than one forms on the same bar: Order Block > Fvg > Rejection Block
 bearEventTop = bearOBevent ? high[1] : bearFVG ? low[2] : high
