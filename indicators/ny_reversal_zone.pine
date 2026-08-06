@@ -29,6 +29,7 @@ sweepTicks     = input.int(1, "Min sweep beyond HOD/LOD (ticks)", minval = 0, gr
 wickRatio      = input.float(50, "Min wick rejection (% of candle range)", minval = 0, maxval = 100, group = gZone) / 100
 pivotLen       = input.int(5, "Swing pivot length (for Advanced EQ)", minval = 1, group = gZone)
 zoneBufferTicks = input.int(40, "Reversal zone buffer beyond swept level (ticks)", minval = 0, group = gZone)
+confirmBars    = input.int(3, "Reversal confirmation window (bars after sweep)", minval = 1, group = gZone)
 
 // ── Confluences ──────────────────────────────────────────────
 gConf          = "Confluences"
@@ -46,7 +47,7 @@ pdBasis        = input.string("Session Range", "PD Array range basis", options =
 zoneLookback   = input.int(10, "Nearby lookback (bars)", minval = 1, group = gConf)
 nearTicks      = input.int(10, "Nearby price tolerance (ticks)", minval = 0, group = gConf)
 ceTicks        = input.int(15, "Cz / Advanced EQ tolerance (ticks)", minval = 1, group = gConf)
-minConfluences = input.int(6, "Minimum confluences required", minval = 1, maxval = 10, group = gConf)
+minConfluences = input.int(4, "Minimum confluences required", minval = 1, maxval = 10, group = gConf)
 
 // ── Box Style ──────────────────────────────────────────────
 gStyle    = "Box Style"
@@ -174,18 +175,55 @@ premiumCondition   = not na(pdMid) and close > pdMid  // favorable for bearish (
 wfBear = barRange > 0 and (upperWick / barRange) >= wickRatio
 wfBull = barRange > 0 and (lowerWick / barRange) >= wickRatio
 
-// ── Sweep / Turtle Soup ──────────────────────────────────────────────
+// ── Sweep / Confirmation ──────────────────────────────────────────────
+// A sweep just marks a candidate; the reversal must then *confirm* within
+// `confirmBars` bars (price fails to extend and closes back through the
+// prior bar's high/low) rather than requiring both to happen on one candle -
+// real tops/bottoms often take a bar or two to actually reject.
 sweepHigh = not na(sessHigh[1]) and high >= sessHigh[1] + sweepTicks * tick
 sweepLow  = not na(sessLow[1]) and low <= sessLow[1] - sweepTicks * tick
-tsBear    = not na(sessHigh[1]) and close < sessHigh[1]
-tsBull    = not na(sessLow[1]) and close > sessLow[1]
+
+var int   pendingBearBar   = na
+var float pendingBearWick  = na
+var float pendingBearLevel = na
+var int   pendingBullBar   = na
+var float pendingBullWick  = na
+var float pendingBullLevel = na
+
+if sweepHigh
+    pendingBearBar   := bar_index
+    pendingBearWick  := high
+    pendingBearLevel := sessHigh[1]
+if sweepLow
+    pendingBullBar   := bar_index
+    pendingBullWick  := low
+    pendingBullLevel := sessLow[1]
+
+bearPending = not na(pendingBearBar) and (bar_index - pendingBearBar) <= confirmBars
+bullPending = not na(pendingBullBar) and (bar_index - pendingBullBar) <= confirmBars
+
+bearTrigger = bearPending and not sweepHigh and close < high[1]
+bullTrigger = bullPending and not sweepLow and close > low[1]
+
+tsBear = bearTrigger and (bar_index - pendingBearBar) <= 1  // confirmed same/next bar = classic turtle soup
+tsBull = bullTrigger and (bar_index - pendingBullBar) <= 1
+
+bearZoneWick  = pendingBearWick
+bearZoneLevel = pendingBearLevel
+bullZoneWick  = pendingBullWick
+bullZoneLevel = pendingBullLevel
+
+if bearTrigger
+    pendingBearBar := na
+if bullTrigger
+    pendingBullBar := na
 
 // ── Confluence Scoring ──────────────────────────────────────────────
 bearCount = (useTS and tsBear ? 1 : 0) + (useFVG and fvgNearBear ? 1 : 0) + (useIR and irNearBear ? 1 : 0) + (useCZ and czCondition ? 1 : 0) + (useAdvEQ and advEqCondition ? 1 : 0) + (useWF and wfBear ? 1 : 0) + (useOB and obNearBear ? 1 : 0) + (useRB and rbNearBear ? 1 : 0) + (useCompleted and completedNearBear ? 1 : 0) + (usePD and premiumCondition ? 1 : 0)
 bullCount = (useTS and tsBull ? 1 : 0) + (useFVG and fvgNearBull ? 1 : 0) + (useIR and irNearBull ? 1 : 0) + (useCZ and czCondition ? 1 : 0) + (useAdvEQ and advEqCondition ? 1 : 0) + (useWF and wfBull ? 1 : 0) + (useOB and obNearBull ? 1 : 0) + (useRB and rbNearBull ? 1 : 0) + (useCompleted and completedNearBull ? 1 : 0) + (usePD and discountCondition ? 1 : 0)
 
-bearSignal = inSession and sweepHigh and bearCount >= minConfluences
-bullSignal = inSession and sweepLow and bullCount >= minConfluences
+bearSignal = inSession and bearTrigger and bearCount >= minConfluences
+bullSignal = inSession and bullTrigger and bullCount >= minConfluences
 
 // ── Zone Boxes ──────────────────────────────────────────────
 var box[]   activeBoxes  = array.new<box>()
@@ -207,16 +245,16 @@ if array.size(activeBoxes) > 0
             box.set_right(b, bar_index + 1)
 
 if bearSignal
-    zTop = high
-    zBot = sessHigh[1] - zoneBufferTicks * tick
+    zTop = bearZoneWick
+    zBot = bearZoneLevel - zoneBufferTicks * tick
     newBox = box.new(bar_index, zTop, bar_index + 1, zBot, border_color = borderCol, bgcolor = bearColor, extend = extend.none)
     array.push(activeBoxes, newBox)
     array.push(boxTops, zTop)
     array.push(boxBottoms, zBot)
 
 if bullSignal
-    zTop = sessLow[1] + zoneBufferTicks * tick
-    zBot = low
+    zTop = bullZoneLevel + zoneBufferTicks * tick
+    zBot = bullZoneWick
     newBox = box.new(bar_index, zTop, bar_index + 1, zBot, border_color = borderCol, bgcolor = bullColor, extend = extend.none)
     array.push(activeBoxes, newBox)
     array.push(boxTops, zTop)
