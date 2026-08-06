@@ -77,10 +77,11 @@ borderCol = input.color(color.new(color.white, 60), "Border color", group = gSty
 // tapped, whether price actually moved away by a meaningful amount within a
 // following window, or just kept going (continuation/false signal), and
 // keeps a running win rate instead of you having to count by hand.
-gStats        = "Stats"
-outcomeBars   = input.int(10, "Bars to judge tap outcome", minval = 1, group = gStats)
-reversalTicks = input.int(20, "Min move away from zone to count as reversal (ticks)", minval = 1, group = gStats)
-showStats     = input.bool(true, "Show win-rate table", group = gStats)
+gStats             = "Stats"
+outcomeBars        = input.int(10, "Bars to judge tap outcome", minval = 1, group = gStats)
+reversalTicks      = input.int(20, "Min move away from zone to count as reversal (ticks)", minval = 1, group = gStats)
+showStats          = input.bool(true, "Show win-rate table", group = gStats)
+showConfluenceStats = input.bool(false, "Show per-confluence breakdown table (large)", group = gStats)
 
 tick = syminfo.mintick
 
@@ -414,16 +415,17 @@ if showStats and barstate.islast
 
 // ── Per-Confluence Win Rate Table ──────────────────────────────────────────────
 // Which confluences actually correlate with a zone reversing, vs just padding the count.
-var table confTable = table.new(position.bottom_right, 3, 14, bgcolor = color.new(color.black, 20), border_width = 1, border_color = color.gray)
+// Off by default and compact (one merged column, tiny text) since a 14-row table
+// eats most of a phone screen - turn it on with showConfluenceStats when you
+// actually want to dig into it.
+var table confTable = table.new(position.bottom_right, 2, 14, bgcolor = color.new(color.black, 20), border_width = 1, border_color = color.gray)
 
-if showStats and barstate.islast
-    table.cell(confTable, 0, 0, "Confluence", text_color = color.white, bgcolor = color.new(color.gray, 40))
-    table.cell(confTable, 1, 0, "Present", text_color = color.white, bgcolor = color.new(color.gray, 40))
-    table.cell(confTable, 2, 0, "Win%", text_color = color.white, bgcolor = color.new(color.gray, 40))
+if showConfluenceStats and barstate.islast
+    table.cell(confTable, 0, 0, "Confl.", text_color = color.white, bgcolor = color.new(color.gray, 40), text_size = size.tiny)
+    table.cell(confTable, 1, 0, "N/Win%", text_color = color.white, bgcolor = color.new(color.gray, 40), text_size = size.tiny)
     for k = 0 to nConf - 1
         present = array.get(confPresentCount, k)
         wins    = array.get(confWinCount, k)
         winPct  = present > 0 ? (wins / present) * 100 : na
-        table.cell(confTable, 0, k + 1, array.get(confNames, k), text_color = color.white)
-        table.cell(confTable, 1, k + 1, str.tostring(present), text_color = color.white)
-        table.cell(confTable, 2, k + 1, na(winPct) ? "-" : str.tostring(winPct, "#.0") + "%", text_color = color.white)
+        table.cell(confTable, 0, k + 1, array.get(confNames, k), text_color = color.white, text_size = size.tiny)
+        table.cell(confTable, 1, k + 1, str.tostring(present) + " / " + (na(winPct) ? "-" : str.tostring(winPct, "#.0") + "%"), text_color = color.white, text_size = size.tiny)
