@@ -108,6 +108,9 @@ f_sessionHL(sessStr, show, col, lblH, lblL) =>
         sL := math.min(sL, low)
     justEnded = not inSess and not na(t[1])
     if justEnded and show
+        if not na(lnH)
+            line.delete(lnH)
+            line.delete(lnL)
         lnH := line.new(bar_index - 1, sH, bar_index, sH, extend = extend.right, color = col, width = lineWidth)
         lnL := line.new(bar_index - 1, sL, bar_index, sL, extend = extend.right, color = col, width = lineWidth)
         label.new(bar_index, sH, lblH, style = label.style_label_left, color = color.new(col, 100), textcolor = col, size = size.small)
