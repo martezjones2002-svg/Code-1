@@ -1,5 +1,5 @@
 //@version=6
-indicator("ICT Context & Bias", "ICT Bias", overlay = true, max_lines_count = 500, max_labels_count = 50)
+indicator("ICT Context & Bias", "ICT Bias", overlay = true, max_lines_count = 500, max_labels_count = 50, max_boxes_count = 50)
 
 // Stage 1 of a multi-stage build: context/bias only. No PD arrays, no entry
 // signals yet - this just automates the manual markup (opening prices,
@@ -219,6 +219,88 @@ if new0930 and showRSQuadrants and not na(rsPrice)
         lvl = base + rng2 * (q / 4.0)
         qLine2 = line.new(bar_index - 1, lvl, bar_index, lvl, extend = extend.right, color = color.new(color.red, 60), width = 1, style = line.style_dotted)
         array.push(rsQuadLines, qLine2)
+
+// ══════════════════════════════════════════════════════════════════
+// STAGE 2a: PD ARRAYS — Order Blocks
+// ══════════════════════════════════════════════════════════════════
+// Bullish OB: the last down-close candle before a strong up expansion.
+// Bearish OB: the last up-close candle before a strong down expansion.
+// POI: the OB candle's opening price if its wick > body, otherwise the CE
+// (midpoint of the full candle range). One active OB per direction at a
+// time - a new one only replaces the old once it's been tapped.
+//
+// Known limitation: this only catches the OB candle sitting immediately
+// before the expansion leg. Your notes showed a valid example where a
+// small pullback/consolidation sits between the true OB candle and the
+// actual expansion - that variant isn't detected yet.
+
+gOB                = "Order Blocks"
+useOB              = input.bool(true, "Show Order Blocks", group = gOB)
+obLookback         = input.int(20, "Avg range lookback (bars)", minval = 5, group = gOB)
+obDisplacementMult = input.float(1.5, "Min displacement (x avg range)", minval = 1.0, group = gOB)
+obWidthBars        = input.int(6, "OB box width (bars)", minval = 1, group = gOB)
+bullOBColor        = input.color(color.new(color.teal, 80), "Bullish OB color", group = gOB)
+bearOBColor        = input.color(color.new(color.red, 80), "Bearish OB color", group = gOB)
+
+avgRange     = ta.sma(high - low, obLookback)
+displacement = (high - low) > avgRange * obDisplacementMult
+
+bullOBevent = close[1] < open[1] and close > high[1] and displacement
+bearOBevent = close[1] > open[1] and close < low[1] and displacement
+
+obBody1        = math.abs(close[1] - open[1])
+obWick1        = (high[1] - low[1]) - obBody1
+obUseOpenPrice = obWick1 > obBody1
+obPOI          = obUseOpenPrice ? open[1] : (high[1] + low[1]) / 2
+
+var box   bullOBBox   = na
+var float bullOBTopV  = na
+var float bullOBBotV  = na
+var float bullOBPOIv  = na
+var line  bullOBPOIln = na
+
+var box   bearOBBox   = na
+var float bearOBTopV  = na
+var float bearOBBotV  = na
+var float bearOBPOIv  = na
+var line  bearOBPOIln = na
+
+// tap-check runs before creation so a same-bar tap-then-reform works
+if not na(bullOBBox)
+    if low <= bullOBTopV and high >= bullOBBotV
+        box.delete(bullOBBox)
+        line.delete(bullOBPOIln)
+        bullOBBox := na
+    else
+        box.set_left(bullOBBox, bar_index - obWidthBars + 1)
+        box.set_right(bullOBBox, bar_index + 1)
+        line.set_x1(bullOBPOIln, bar_index - obWidthBars + 1)
+        line.set_x2(bullOBPOIln, bar_index + 1)
+
+if not na(bearOBBox)
+    if low <= bearOBTopV and high >= bearOBBotV
+        box.delete(bearOBBox)
+        line.delete(bearOBPOIln)
+        bearOBBox := na
+    else
+        box.set_left(bearOBBox, bar_index - obWidthBars + 1)
+        box.set_right(bearOBBox, bar_index + 1)
+        line.set_x1(bearOBPOIln, bar_index - obWidthBars + 1)
+        line.set_x2(bearOBPOIln, bar_index + 1)
+
+if useOB and bullOBevent and na(bullOBBox)
+    bullOBTopV  := high[1]
+    bullOBBotV  := low[1]
+    bullOBPOIv  := obPOI
+    bullOBBox   := box.new(bar_index - obWidthBars + 1, bullOBTopV, bar_index + 1, bullOBBotV, border_color = color.teal, bgcolor = bullOBColor, extend = extend.none)
+    bullOBPOIln := line.new(bar_index - obWidthBars + 1, bullOBPOIv, bar_index + 1, bullOBPOIv, color = color.teal, width = 1, style = line.style_dashed)
+
+if useOB and bearOBevent and na(bearOBBox)
+    bearOBTopV  := high[1]
+    bearOBBotV  := low[1]
+    bearOBPOIv  := obPOI
+    bearOBBox   := box.new(bar_index - obWidthBars + 1, bearOBTopV, bar_index + 1, bearOBBotV, border_color = color.red, bgcolor = bearOBColor, extend = extend.none)
+    bearOBPOIln := line.new(bar_index - obWidthBars + 1, bearOBPOIv, bar_index + 1, bearOBPOIv, color = color.red, width = 1, style = line.style_dashed)
 
 // ── Bias Table ──────────────────────────────────────────────
 f_biasColor(ref) =>
