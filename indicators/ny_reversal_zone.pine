@@ -13,6 +13,13 @@ indicator("NY Reversal Zone", "NY Rev Zone", overlay = true, max_boxes_count = 5
 //   Completed Zones      : a tracked Fvg/OB/RB zone was fully filled (closed through) recently
 //   PD Array             : reaction is on the favorable side (discount for longs, premium for shorts)
 //                          of the chosen range's 50%
+//
+// A box is drawn the moment a Fvg/Order Block/Rejection Block forms (not
+// after price has already reversed away from it) if enough of the above
+// confluences line up. It sits at that fixed price, its right edge pushed
+// forward every bar, until price actually trades back into it - at which
+// point it's deleted. Only one zone box per direction is tracked at a time;
+// a new one only appears once the old one has been tapped.
 
 // ── Session ──────────────────────────────────────────────
 gSess        = "Session"
@@ -28,8 +35,7 @@ gZone          = "Reversal Zone"
 sweepTicks     = input.int(1, "Min sweep beyond HOD/LOD (ticks)", minval = 0, group = gZone)
 wickRatio      = input.float(50, "Min wick rejection (% of candle range)", minval = 0, maxval = 100, group = gZone) / 100
 pivotLen       = input.int(5, "Swing pivot length (for Advanced EQ)", minval = 1, group = gZone)
-zoneBufferTicks = input.int(40, "Reversal zone buffer beyond swept level (ticks)", minval = 0, group = gZone)
-confirmBars    = input.int(3, "Reversal confirmation window (bars after sweep)", minval = 1, group = gZone)
+confirmBars    = input.int(3, "Turtle Soup confirmation window (bars after sweep)", minval = 1, group = gZone)
 
 // ── Confluences ──────────────────────────────────────────────
 gConf          = "Confluences"
@@ -208,11 +214,6 @@ bullTrigger = bullPending and not sweepLow and close > low[1]
 tsBear = bearTrigger and (bar_index - pendingBearBar) <= 1  // confirmed same/next bar = classic turtle soup
 tsBull = bullTrigger and (bar_index - pendingBullBar) <= 1
 
-bearZoneWick  = pendingBearWick
-bearZoneLevel = pendingBearLevel
-bullZoneWick  = pendingBullWick
-bullZoneLevel = pendingBullLevel
-
 if bearTrigger
     pendingBearBar := na
 if bullTrigger
@@ -222,43 +223,56 @@ if bullTrigger
 bearCount = (useTS and tsBear ? 1 : 0) + (useFVG and fvgNearBear ? 1 : 0) + (useIR and irNearBear ? 1 : 0) + (useCZ and czCondition ? 1 : 0) + (useAdvEQ and advEqCondition ? 1 : 0) + (useWF and wfBear ? 1 : 0) + (useOB and obNearBear ? 1 : 0) + (useRB and rbNearBear ? 1 : 0) + (useCompleted and completedNearBear ? 1 : 0) + (usePD and premiumCondition ? 1 : 0)
 bullCount = (useTS and tsBull ? 1 : 0) + (useFVG and fvgNearBull ? 1 : 0) + (useIR and irNearBull ? 1 : 0) + (useCZ and czCondition ? 1 : 0) + (useAdvEQ and advEqCondition ? 1 : 0) + (useWF and wfBull ? 1 : 0) + (useOB and obNearBull ? 1 : 0) + (useRB and rbNearBull ? 1 : 0) + (useCompleted and completedNearBull ? 1 : 0) + (usePD and discountCondition ? 1 : 0)
 
-bearSignal = inSession and bearTrigger and bearCount >= minConfluences
-bullSignal = inSession and bullTrigger and bullCount >= minConfluences
+// ── Zone Formation (the box appears here, not after a confirmed reversal) ──────────────────────────────────────────────
+newBearZoneEvent = bearOBevent or bearFVG or bearRBevent
+newBullZoneEvent = bullOBevent or bullFVG or bullRBevent
 
-// ── Zone Boxes ──────────────────────────────────────────────
-var box[]   activeBoxes  = array.new<box>()
-var float[] boxTops      = array.new<float>()
-var float[] boxBottoms   = array.new<float>()
+// priority when more than one forms on the same bar: Order Block > Fvg > Rejection Block
+bearEventTop = bearOBevent ? high[1] : bearFVG ? low[2] : high
+bearEventBot = bearOBevent ? low[1]  : bearFVG ? high   : math.max(open, close)
+bullEventTop = bullOBevent ? high[1] : bullFVG ? low    : math.min(open, close)
+bullEventBot = bullOBevent ? low[1]  : bullFVG ? high[2] : low
 
-if array.size(activeBoxes) > 0
-    for i = array.size(activeBoxes) - 1 to 0
-        b      = array.get(activeBoxes, i)
-        top    = array.get(boxTops, i)
-        bottom = array.get(boxBottoms, i)
-        tapped = low <= top and high >= bottom
-        if tapped
-            box.delete(b)
-            array.remove(activeBoxes, i)
-            array.remove(boxTops, i)
-            array.remove(boxBottoms, i)
-        else
-            box.set_right(b, bar_index + 1)
+var box   bearZoneBox = na
+var float bearZoneTop = na
+var float bearZoneBot = na
+var box   bullZoneBox = na
+var float bullZoneTop = na
+var float bullZoneBot = na
 
-if bearSignal
-    zTop = bearZoneWick
-    zBot = bearZoneLevel - zoneBufferTicks * tick
-    newBox = box.new(bar_index, zTop, bar_index + 1, zBot, border_color = borderCol, bgcolor = bearColor, extend = extend.none)
-    array.push(activeBoxes, newBox)
-    array.push(boxTops, zTop)
-    array.push(boxBottoms, zBot)
+// ── Zone Boxes (one active box per direction; replaced only once tapped) ──────────────────────────────────────────────
+// Runs before the signal gate below so a box tapped on this same bar can be
+// immediately replaced by a new one, instead of waiting a bar.
+if not na(bearZoneBox)
+    if low <= bearZoneTop and high >= bearZoneBot
+        box.delete(bearZoneBox)
+        bearZoneBox := na
+    else
+        box.set_right(bearZoneBox, bar_index + 1)
 
-if bullSignal
-    zTop = bullZoneLevel + zoneBufferTicks * tick
-    zBot = bullZoneWick
-    newBox = box.new(bar_index, zTop, bar_index + 1, zBot, border_color = borderCol, bgcolor = bullColor, extend = extend.none)
-    array.push(activeBoxes, newBox)
-    array.push(boxTops, zTop)
-    array.push(boxBottoms, zBot)
+if not na(bullZoneBox)
+    if low <= bullZoneTop and high >= bullZoneBot
+        box.delete(bullZoneBox)
+        bullZoneBox := na
+    else
+        box.set_right(bullZoneBox, bar_index + 1)
 
-alertcondition(bearSignal, "Bearish Reversal Zone", "NY Reversal Zone: bearish zone formed at HOD sweep")
-alertcondition(bullSignal, "Bullish Reversal Zone", "NY Reversal Zone: bullish zone formed at LOD sweep")
+bearZoneSignal = inSession and newBearZoneEvent and bearCount >= minConfluences and na(bearZoneBox)
+bullZoneSignal = inSession and newBullZoneEvent and bullCount >= minConfluences and na(bullZoneBox)
+
+// alias kept for alertcondition naming below
+bearSignal = bearZoneSignal
+bullSignal = bullZoneSignal
+
+if bearZoneSignal
+    bearZoneTop := bearEventTop
+    bearZoneBot := bearEventBot
+    bearZoneBox := box.new(bar_index, bearZoneTop, bar_index + 1, bearZoneBot, border_color = borderCol, bgcolor = bearColor, extend = extend.none)
+
+if bullZoneSignal
+    bullZoneTop := bullEventTop
+    bullZoneBot := bullEventBot
+    bullZoneBox := box.new(bar_index, bullZoneTop, bar_index + 1, bullZoneBot, border_color = borderCol, bgcolor = bullColor, extend = extend.none)
+
+alertcondition(bearSignal, "Bearish Reversal Zone", "NY Reversal Zone: bearish zone formed")
+alertcondition(bullSignal, "Bullish Reversal Zone", "NY Reversal Zone: bullish zone formed")
