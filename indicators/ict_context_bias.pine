@@ -13,7 +13,8 @@ indicator("ICT Context & Bias", "ICT Bias", overlay = true, max_lines_count = 50
 //     separate proprietary indicator per the notes) - wired as a manual
 //     price input rather than guessed at.
 
-tz = "America/New_York"
+tz   = "America/New_York"
+tick = syminfo.mintick
 
 // ── Opening Prices ──────────────────────────────────────────────
 gOpens        = "Opening Prices"
@@ -301,6 +302,149 @@ if useOB and bearOBevent and na(bearOBBox)
     bearOBPOIv  := obPOI
     bearOBBox   := box.new(bar_index - obWidthBars + 1, bearOBTopV, bar_index + 1, bearOBBotV, border_color = color.red, bgcolor = bearOBColor, extend = extend.none)
     bearOBPOIln := line.new(bar_index - obWidthBars + 1, bearOBPOIv, bar_index + 1, bearOBPOIv, color = color.red, width = 1, style = line.style_dashed)
+
+// ══════════════════════════════════════════════════════════════════
+// STAGE 2b: PD ARRAYS — Rejection Blocks & Inverse Rejection Blocks
+// ══════════════════════════════════════════════════════════════════
+// RB forms from a wick that rejects a swept high/low. Fib anchored to the
+// candle's own high(1)/low(0), CE(0.5) = midpoint:
+//   Bullish RB (rejects lower prices): use top(1) and CE(0.5), never bottom(0).
+//   Bearish RB (rejects higher prices): use bottom(0) and CE(0.5), never top(1).
+// iRB forms when an RB's full range gets closed through (not just touched) -
+// it inverts, and the *new* direction's usage rule applies to the same box.
+//
+// Not yet implemented (follow-up pass): Failure Swing + RB reclassification,
+// and RB forming from a PLC/PHC rejection (only the liquidity-sweep trigger
+// is covered here).
+
+gRB            = "Rejection Blocks"
+useRB          = input.bool(true, "Show Rejection Blocks / iRB", group = gRB)
+rbWickRatio    = input.float(50, "Min wick (% of candle range)", minval = 0, maxval = 100, group = gRB) / 100
+rbSweepLookback = input.int(20, "Sweep reference lookback (bars)", minval = 5, group = gRB)
+rbSweepTicks   = input.int(1, "Min sweep beyond prior extreme (ticks)", minval = 0, group = gRB)
+rbWidthBars    = input.int(6, "RB/iRB box width (bars)", minval = 1, group = gRB)
+bullRBColor    = input.color(color.new(color.teal, 85), "Bullish RB color", group = gRB)
+bearRBColor    = input.color(color.new(color.red, 85), "Bearish RB color", group = gRB)
+bullIRBColor   = input.color(color.new(color.blue, 80), "Bullish iRB color", group = gRB)
+bearIRBColor   = input.color(color.new(color.orange, 80), "Bearish iRB color", group = gRB)
+
+rbBarRange = high - low
+rbUpperWick = high - math.max(open, close)
+rbLowerWick = math.min(open, close) - low
+
+rbPriorHigh = ta.highest(high, rbSweepLookback)[1]
+rbPriorLow  = ta.lowest(low, rbSweepLookback)[1]
+rbSweptHigh = not na(rbPriorHigh) and high >= rbPriorHigh + rbSweepTicks * tick
+rbSweptLow  = not na(rbPriorLow) and low <= rbPriorLow - rbSweepTicks * tick
+
+bullRBevent = useRB and rbBarRange > 0 and (rbLowerWick / rbBarRange) >= rbWickRatio and rbSweptLow
+bearRBevent = useRB and rbBarRange > 0 and (rbUpperWick / rbBarRange) >= rbWickRatio and rbSweptHigh
+
+var box   bullRBBox   = na
+var float bullRBTop   = na
+var float bullRBBot   = na
+var line  bullRBPOIln = na
+
+var box   bearRBBox   = na
+var float bearRBTop   = na
+var float bearRBBot   = na
+var line  bearRBPOIln = na
+
+var box   bullIRBBox   = na
+var float bullIRBTop   = na
+var float bullIRBBot   = na
+var line  bullIRBPOIln = na
+
+var box   bearIRBBox   = na
+var float bearIRBTop   = na
+var float bearIRBBot   = na
+var line  bearIRBPOIln = na
+
+// ── iRB: plain tap-check first (runs before RB invert-check below, so a
+// freshly-spawned iRB this bar isn't immediately self-tapped by the same
+// bar's data that created it) ──────────────────────────────────────────────
+if not na(bullIRBBox)
+    if low <= bullIRBTop and high >= bullIRBBot
+        box.delete(bullIRBBox)
+        line.delete(bullIRBPOIln)
+        bullIRBBox := na
+    else
+        box.set_left(bullIRBBox, bar_index - rbWidthBars + 1)
+        box.set_right(bullIRBBox, bar_index + 1)
+        line.set_x1(bullIRBPOIln, bar_index - rbWidthBars + 1)
+        line.set_x2(bullIRBPOIln, bar_index + 1)
+
+if not na(bearIRBBox)
+    if low <= bearIRBTop and high >= bearIRBBot
+        box.delete(bearIRBBox)
+        line.delete(bearIRBPOIln)
+        bearIRBBox := na
+    else
+        box.set_left(bearIRBBox, bar_index - rbWidthBars + 1)
+        box.set_right(bearIRBBox, bar_index + 1)
+        line.set_x1(bearIRBPOIln, bar_index - rbWidthBars + 1)
+        line.set_x2(bearIRBPOIln, bar_index + 1)
+
+// ── Bullish RB: tap / invert-check ──────────────────────────────────────────────
+if not na(bullRBBox)
+    if close < bullRBBot
+        // closed fully through -> inverts to a bearish iRB (use bottom+CE, not top)
+        box.delete(bullRBBox)
+        line.delete(bullRBPOIln)
+        bullRBBox := na
+        if na(bearIRBBox)
+            bearIRBTop  := bullRBTop
+            bearIRBBot  := bullRBBot
+            ce = (bullRBTop + bullRBBot) / 2
+            bearIRBBox   := box.new(bar_index - rbWidthBars + 1, bearIRBTop, bar_index + 1, bearIRBBot, border_color = color.orange, bgcolor = bearIRBColor, extend = extend.none)
+            bearIRBPOIln := line.new(bar_index - rbWidthBars + 1, ce, bar_index + 1, ce, color = color.orange, width = 1, style = line.style_dashed)
+    else if low <= bullRBTop and high >= bullRBBot
+        box.delete(bullRBBox)
+        line.delete(bullRBPOIln)
+        bullRBBox := na
+    else
+        box.set_left(bullRBBox, bar_index - rbWidthBars + 1)
+        box.set_right(bullRBBox, bar_index + 1)
+        line.set_x1(bullRBPOIln, bar_index - rbWidthBars + 1)
+        line.set_x2(bullRBPOIln, bar_index + 1)
+
+// ── Bearish RB: tap / invert-check ──────────────────────────────────────────────
+if not na(bearRBBox)
+    if close > bearRBTop
+        // closed fully through -> inverts to a bullish iRB (use top+CE, not bottom)
+        box.delete(bearRBBox)
+        line.delete(bearRBPOIln)
+        bearRBBox := na
+        if na(bullIRBBox)
+            bullIRBTop  := bearRBTop
+            bullIRBBot  := bearRBBot
+            ce2 = (bearRBTop + bearRBBot) / 2
+            bullIRBBox   := box.new(bar_index - rbWidthBars + 1, bullIRBTop, bar_index + 1, bullIRBBot, border_color = color.blue, bgcolor = bullIRBColor, extend = extend.none)
+            bullIRBPOIln := line.new(bar_index - rbWidthBars + 1, ce2, bar_index + 1, ce2, color = color.blue, width = 1, style = line.style_dashed)
+    else if low <= bearRBTop and high >= bearRBBot
+        box.delete(bearRBBox)
+        line.delete(bearRBPOIln)
+        bearRBBox := na
+    else
+        box.set_left(bearRBBox, bar_index - rbWidthBars + 1)
+        box.set_right(bearRBBox, bar_index + 1)
+        line.set_x1(bearRBPOIln, bar_index - rbWidthBars + 1)
+        line.set_x2(bearRBPOIln, bar_index + 1)
+
+// ── New RB formation ──────────────────────────────────────────────
+if bullRBevent and na(bullRBBox)
+    bullRBTop   := high
+    bullRBBot   := low
+    ce3 = (high + low) / 2
+    bullRBBox   := box.new(bar_index - rbWidthBars + 1, bullRBTop, bar_index + 1, bullRBBot, border_color = color.teal, bgcolor = bullRBColor, extend = extend.none)
+    bullRBPOIln := line.new(bar_index - rbWidthBars + 1, ce3, bar_index + 1, ce3, color = color.teal, width = 1, style = line.style_dashed)
+
+if bearRBevent and na(bearRBBox)
+    bearRBTop   := high
+    bearRBBot   := low
+    ce4 = (high + low) / 2
+    bearRBBox   := box.new(bar_index - rbWidthBars + 1, bearRBTop, bar_index + 1, bearRBBot, border_color = color.red, bgcolor = bearRBColor, extend = extend.none)
+    bearRBPOIln := line.new(bar_index - rbWidthBars + 1, ce4, bar_index + 1, ce4, color = color.red, width = 1, style = line.style_dashed)
 
 // ── Bias Table ──────────────────────────────────────────────
 f_biasColor(ref) =>
