@@ -48,59 +48,84 @@ rsPriceInput    = input.float(0.0, "Today's RS Price (from your RS indicator, 0 
 rsPrice         = rsPriceInput > 0 ? rsPriceInput : na
 showRSQuadrants = input.bool(true, "Show RS Quadrants (9:30 Open -> RS)", group = gRS)
 
+// ── Precision ──────────────────────────────────────────────
+// Clock-time events (8:30/9:30/13:30/18:00/etc) need to be detected on a
+// fixed low timeframe, not whatever timeframe the chart happens to be on -
+// a 4h or 1h chart doesn't reliably have a bar starting exactly at those
+// times, so detecting directly on the chart's own bars silently misses
+// them. Everything below is computed on `lowerTF` via request.security and
+// pulled onto whatever timeframe the chart is actually showing.
+gPrecision = "Precision"
+lowerTF    = input.timeframe("5", "Internal calc timeframe (leave at 5 unless you know why)", group = gPrecision)
+
 // ── Style ──────────────────────────────────────────────
 gStyle        = "Style"
 lineWidth     = input.int(1, "Line Width", minval = 1, group = gStyle)
 showBiasTable = input.bool(true, "Show Bias Table", group = gStyle)
 
-// ── Helpers ──────────────────────────────────────────────
-// Detect the first bar of a recurring daily clock time and draw/refresh a
-// persistent right-extending line at that bar's open. Each call site keeps
-// its own independent state (Pine tracks `var` per call-site).
-f_openLine(sessStr, show, col, lbl) =>
-    var float lvl = na
-    var line ln = na
-    var label la = na
+// ── Lower-timeframe engine (runs inside request.security) ──────────────────────────────────────────────
+f_ltfOpenAt(sessStr) =>
     t = time(timeframe.period, sessStr, tz)
     isNew = not na(t) and na(t[1])
+    var float v = na
     if isNew
-        lvl := open
-        if not na(ln)
-            line.delete(ln)
-            label.delete(la)
-        if show
-            ln := line.new(bar_index, lvl, bar_index + 1, lvl, extend = extend.right, color = col, width = lineWidth)
-            la := label.new(bar_index, lvl, lbl, style = label.style_label_left, color = color.new(col, 100), textcolor = col, size = size.small)
-    lvl
+        v := open
+    v
 
-// Detect the first bar of the week (Sunday 18:00 NY) specifically.
-f_weeklyOpenLine(show, col, lbl) =>
-    var float lvl = na
-    var line ln = na
-    var label la = na
+f_ltfWeeklyOpen() =>
     t = time(timeframe.period, "1800-1801", tz)
     isSun = dayofweek(time, tz) == dayofweek.sunday
     isNew = not na(t) and isSun and not (not na(t[1]) and dayofweek(time[1], tz) == dayofweek.sunday)
+    var float v = na
     if isNew
-        lvl := open
-        if not na(ln)
-            line.delete(ln)
-            label.delete(la)
-        if show
-            ln := line.new(bar_index, lvl, bar_index + 1, lvl, extend = extend.right, color = col, width = lineWidth)
-            la := label.new(bar_index, lvl, lbl, style = label.style_label_left, color = color.new(col, 100), textcolor = col, size = size.small)
-    lvl
+        v := open
+    v
 
-// Rolling session high/low: tracks live during the session, freezes and
-// draws a line for the completed range once the session ends.
-f_sessionHL(sessStr, show, col, lblH, lblL) =>
-    var float sH = na
-    var float sL = na
-    var line lnH = na
-    var line lnL = na
+f_ltfDayHL() =>
+    t = time(timeframe.period, "1800-1801", tz)
+    isNewDay = not na(t) and na(t[1])
+    var float dH = na
+    var float dL = na
+    var float pH = na
+    var float pL = na
+    if isNewDay
+        if not na(dH)
+            pH := dH
+            pL := dL
+        dH := high
+        dL := low
+    else
+        dH := math.max(nz(dH, high), high)
+        dL := math.min(nz(dL, low), low)
+    [pH, pL]
+
+f_ltfWeekHL() =>
+    t = time(timeframe.period, "1800-1801", tz)
+    isSun = dayofweek(time, tz) == dayofweek.sunday
+    isNewWeek = not na(t) and isSun and not (not na(t[1]) and dayofweek(time[1], tz) == dayofweek.sunday)
+    var float wH = na
+    var float wL = na
+    var float pH = na
+    var float pL = na
+    if isNewWeek
+        if not na(wH)
+            pH := wH
+            pL := wL
+        wH := high
+        wL := low
+    else
+        wH := math.max(nz(wH, high), high)
+        wL := math.min(nz(wL, low), low)
+    [pH, pL]
+
+f_ltfSessionHL(sessStr) =>
     t = time(timeframe.period, sessStr, tz)
     inSess = not na(t)
     isNew = inSess and na(t[1])
+    var float sH = na
+    var float sL = na
+    var float fH = na
+    var float fL = na
     if isNew
         sH := high
         sL := low
@@ -108,79 +133,74 @@ f_sessionHL(sessStr, show, col, lblH, lblL) =>
         sH := math.max(sH, high)
         sL := math.min(sL, low)
     justEnded = not inSess and not na(t[1])
-    if justEnded and show
+    if justEnded
+        fH := sH
+        fL := sL
+    [fH, fL]
+
+// ── Draw helpers (chart-timeframe side: detect a pulled value changing, redraw) ──────────────────────────────────────────────
+f_drawOnChange(v, show, col, lbl) =>
+    var float lvl = na
+    var line ln = na
+    var label la = na
+    changed = not na(v) and (na(lvl) or v != lvl)
+    if changed
+        lvl := v
+        if not na(ln)
+            line.delete(ln)
+            label.delete(la)
+        if show
+            ln := line.new(bar_index, lvl, bar_index + 1, lvl, extend = extend.right, color = col, width = lineWidth)
+            la := label.new(bar_index, lvl, lbl, style = label.style_label_left, color = color.new(col, 100), textcolor = col, size = size.small)
+    lvl
+
+f_drawHLOnChange(vH, vL, show, col, lblH, lblL, lstyle) =>
+    var float lH = na
+    var float lL = na
+    var line lnH = na
+    var line lnL = na
+    changed = not na(vH) and (na(lH) or vH != lH)
+    if changed
+        lH := vH
+        lL := vL
         if not na(lnH)
             line.delete(lnH)
             line.delete(lnL)
-        lnH := line.new(bar_index - 1, sH, bar_index, sH, extend = extend.right, color = col, width = lineWidth)
-        lnL := line.new(bar_index - 1, sL, bar_index, sL, extend = extend.right, color = col, width = lineWidth)
-        label.new(bar_index, sH, lblH, style = label.style_label_left, color = color.new(col, 100), textcolor = col, size = size.small)
-        label.new(bar_index, sL, lblL, style = label.style_label_left, color = color.new(col, 100), textcolor = col, size = size.small)
-    [sH, sL]
+        if show
+            lnH := line.new(bar_index, lH, bar_index + 1, lH, extend = extend.right, color = col, width = lineWidth, style = lstyle)
+            lnL := line.new(bar_index, lL, bar_index + 1, lL, extend = extend.right, color = col, width = lineWidth, style = lstyle)
+            label.new(bar_index, lH, lblH, style = label.style_label_left, color = color.new(col, 100), textcolor = col, size = size.small)
+            label.new(bar_index, lL, lblL, style = label.style_label_left, color = color.new(col, 100), textcolor = col, size = size.small)
+    [lH, lL]
 
 // ── Opening Price Lines ──────────────────────────────────────────────
-trueDayOpen  = f_openLine("0000-0001", showTrueDay, color.gray, "True Day Open")
-open0830     = f_openLine("0830-0831", show0830, color.orange, "8:30 Open")
-open0930     = f_openLine("0930-0931", show0930, color.blue, "9:30 Open")
-open1330     = f_openLine("1330-1331", show1330, color.purple, "13:30 Open")
-dailyOpen    = f_openLine("1800-1801", showDailyOpen, color.black, "Daily Open")
-weeklyOpen   = f_weeklyOpenLine(showWeeklyOpen, color.new(color.orange, 0), "Weekly Open")
+ltfTrueDay = request.security(syminfo.tickerid, lowerTF, f_ltfOpenAt("0000-0001"), lookahead = barmerge.lookahead_off)
+ltf0830    = request.security(syminfo.tickerid, lowerTF, f_ltfOpenAt("0830-0831"), lookahead = barmerge.lookahead_off)
+ltf0930    = request.security(syminfo.tickerid, lowerTF, f_ltfOpenAt("0930-0931"), lookahead = barmerge.lookahead_off)
+ltf1330    = request.security(syminfo.tickerid, lowerTF, f_ltfOpenAt("1330-1331"), lookahead = barmerge.lookahead_off)
+ltfDaily   = request.security(syminfo.tickerid, lowerTF, f_ltfOpenAt("1800-1801"), lookahead = barmerge.lookahead_off)
+ltfWeekly  = request.security(syminfo.tickerid, lowerTF, f_ltfWeeklyOpen(), lookahead = barmerge.lookahead_off)
 
-// ── Previous Day / Week High-Low (segmented by Daily Open / Weekly Open) ──────────────────────────────────────────────
-var float dayHigh = na
-var float dayLow  = na
-var float pdh     = na
-var float pdl     = na
-var line pdhLine  = na
-var line pdlLine  = na
+trueDayOpen = f_drawOnChange(ltfTrueDay, showTrueDay, color.gray, "True Day Open")
+open0830    = f_drawOnChange(ltf0830, show0830, color.orange, "8:30 Open")
+open0930    = f_drawOnChange(ltf0930, show0930, color.blue, "9:30 Open")
+open1330    = f_drawOnChange(ltf1330, show1330, color.purple, "13:30 Open")
+dailyOpen   = f_drawOnChange(ltfDaily, showDailyOpen, color.black, "Daily Open")
+weeklyOpen  = f_drawOnChange(ltfWeekly, showWeeklyOpen, color.new(color.orange, 0), "Weekly Open")
 
-tDaily     = time(timeframe.period, "1800-1801", tz)
-newDay     = not na(tDaily) and na(tDaily[1])
-if newDay
-    if not na(dayHigh)
-        pdh := dayHigh
-        pdl := dayLow
-        if showPDHPDL
-            if not na(pdhLine)
-                line.delete(pdhLine)
-                line.delete(pdlLine)
-            pdhLine := line.new(bar_index - 1, pdh, bar_index, pdh, extend = extend.right, color = color.red, width = lineWidth, style = line.style_dashed)
-            pdlLine := line.new(bar_index - 1, pdl, bar_index, pdl, extend = extend.right, color = color.green, width = lineWidth, style = line.style_dashed)
-    dayHigh := high
-    dayLow  := low
-else
-    dayHigh := math.max(nz(dayHigh, high), high)
-    dayLow  := math.min(nz(dayLow, low), low)
+// ── Previous Day / Week High-Low ──────────────────────────────────────────────
+[ltfPDH, ltfPDL] = request.security(syminfo.tickerid, lowerTF, f_ltfDayHL(), lookahead = barmerge.lookahead_off)
+[ltfPWH, ltfPWL] = request.security(syminfo.tickerid, lowerTF, f_ltfWeekHL(), lookahead = barmerge.lookahead_off)
 
-var float weekHigh = na
-var float weekLow  = na
-var float pwh      = na
-var float pwl      = na
-var line pwhLine   = na
-var line pwlLine   = na
-
-tWeekly   = time(timeframe.period, "1800-1801", tz)
-isSunNow  = dayofweek(time, tz) == dayofweek.sunday
-newWeek   = not na(tWeekly) and isSunNow and not (not na(tWeekly[1]) and dayofweek(time[1], tz) == dayofweek.sunday)
-if newWeek
-    if not na(weekHigh)
-        pwh := weekHigh
-        pwl := weekLow
-        if showPWHPWL
-            if not na(pwhLine)
-                line.delete(pwhLine)
-                line.delete(pwlLine)
-            pwhLine := line.new(bar_index - 1, pwh, bar_index, pwh, extend = extend.right, color = color.new(color.red, 40), width = lineWidth, style = line.style_dotted)
-            pwlLine := line.new(bar_index - 1, pwl, bar_index, pwl, extend = extend.right, color = color.new(color.green, 40), width = lineWidth, style = line.style_dotted)
-    weekHigh := high
-    weekLow  := low
-else
-    weekHigh := math.max(nz(weekHigh, high), high)
-    weekLow  := math.min(nz(weekLow, low), low)
+[pdh, pdl] = f_drawHLOnChange(ltfPDH, ltfPDL, showPDHPDL, color.red, "PDH", "PDL", line.style_dashed)
+[pwh, pwl] = f_drawHLOnChange(ltfPWH, ltfPWL, showPWHPWL, color.new(color.red, 40), "PWH", "PWL", line.style_dotted)
 
 // ── PDR Quadrants ──────────────────────────────────────────────
 var line[] pdrQuadLines = array.new<line>()
-if newDay and showPDRQuadrants and not na(pdh) and not na(pdl)
+var float pdrQuadPDH = na
+pdhChanged = showPDRQuadrants and not na(pdh) and (na(pdrQuadPDH) or pdh != pdrQuadPDH)
+if pdhChanged and not na(pdl)
+    pdrQuadPDH := pdh
     if array.size(pdrQuadLines) > 0
         for i = 0 to array.size(pdrQuadLines) - 1
             line.delete(array.get(pdrQuadLines, i))
@@ -188,14 +208,19 @@ if newDay and showPDRQuadrants and not na(pdh) and not na(pdl)
     rng = pdh - pdl
     for q = 0 to 4
         lvl = pdl + rng * (q / 4.0)
-        qLine = line.new(bar_index - 1, lvl, bar_index, lvl, extend = extend.right, color = color.new(color.gray, 60), width = 1, style = line.style_dotted)
+        qLine = line.new(bar_index, lvl, bar_index + 1, lvl, extend = extend.right, color = color.new(color.gray, 60), width = 1, style = line.style_dotted)
         array.push(pdrQuadLines, qLine)
 
 // ── Session Highs/Lows ──────────────────────────────────────────────
-[asiaH, asiaL]   = f_sessionHL(asiaSession, showAsia, color.fuchsia, "Asia High", "Asia Low")
-[londonH, londonL] = f_sessionHL(londonSession, showLondon, color.teal, "London High", "London Low")
-[nyamH, nyamL]   = f_sessionHL(nyamSession, showNYAM, color.blue, "NY AM High", "NY AM Low")
-[nypmH, nypmL]   = f_sessionHL(nypmSession, showNYPM, color.navy, "NY PM High", "NY PM Low")
+[ltfAsiaH, ltfAsiaL]     = request.security(syminfo.tickerid, lowerTF, f_ltfSessionHL(asiaSession), lookahead = barmerge.lookahead_off)
+[ltfLondonH, ltfLondonL] = request.security(syminfo.tickerid, lowerTF, f_ltfSessionHL(londonSession), lookahead = barmerge.lookahead_off)
+[ltfNYAMH, ltfNYAML]     = request.security(syminfo.tickerid, lowerTF, f_ltfSessionHL(nyamSession), lookahead = barmerge.lookahead_off)
+[ltfNYPMH, ltfNYPML]     = request.security(syminfo.tickerid, lowerTF, f_ltfSessionHL(nypmSession), lookahead = barmerge.lookahead_off)
+
+[asiaH, asiaL]     = f_drawHLOnChange(ltfAsiaH, ltfAsiaL, showAsia, color.fuchsia, "Asia High", "Asia Low", line.style_solid)
+[londonH, londonL] = f_drawHLOnChange(ltfLondonH, ltfLondonL, showLondon, color.teal, "London High", "London Low", line.style_solid)
+[nyamH, nyamL]     = f_drawHLOnChange(ltfNYAMH, ltfNYAML, showNYAM, color.blue, "NY AM High", "NY AM Low", line.style_solid)
+[nypmH, nypmL]     = f_drawHLOnChange(ltfNYPMH, ltfNYPML, showNYPM, color.navy, "NY PM High", "NY PM Low", line.style_solid)
 
 // ── Range Settlement (manual) ──────────────────────────────────────────────
 var line rsLine = na
@@ -207,18 +232,18 @@ if not na(rsPrice)
         line.set_y1(rsLine, rsPrice)
         line.set_y2(rsLine, rsPrice)
 
-t0930 = time(timeframe.period, "0930-0931", tz)
-new0930 = not na(t0930) and na(t0930[1])
-if new0930 and showRSQuadrants and not na(rsPrice)
+var float rsQuadOpen0930 = na
+open0930Changed = showRSQuadrants and not na(open0930) and not na(rsPrice) and (na(rsQuadOpen0930) or open0930 != rsQuadOpen0930)
+if open0930Changed
+    rsQuadOpen0930 := open0930
     if array.size(rsQuadLines) > 0
         for i = 0 to array.size(rsQuadLines) - 1
             line.delete(array.get(rsQuadLines, i))
         array.clear(rsQuadLines)
-    base = open
-    rng2 = rsPrice - base
+    rng2 = rsPrice - open0930
     for q = 0 to 4
-        lvl = base + rng2 * (q / 4.0)
-        qLine2 = line.new(bar_index - 1, lvl, bar_index, lvl, extend = extend.right, color = color.new(color.red, 60), width = 1, style = line.style_dotted)
+        lvl = open0930 + rng2 * (q / 4.0)
+        qLine2 = line.new(bar_index, lvl, bar_index + 1, lvl, extend = extend.right, color = color.new(color.red, 60), width = 1, style = line.style_dotted)
         array.push(rsQuadLines, qLine2)
 
 // ══════════════════════════════════════════════════════════════════
