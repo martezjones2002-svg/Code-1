@@ -36,6 +36,7 @@ sweepTicks     = input.int(1, "Min sweep beyond HOD/LOD (ticks)", minval = 0, gr
 wickRatio      = input.float(50, "Min wick rejection (% of candle range)", minval = 0, maxval = 100, group = gZone) / 100
 pivotLen       = input.int(5, "Swing pivot length (for Advanced EQ)", minval = 1, group = gZone)
 confirmBars    = input.int(3, "Turtle Soup confirmation window (bars after sweep)", minval = 1, group = gZone)
+boxWidthBars   = input.int(6, "Zone box width (bars)", minval = 1, group = gZone)
 
 // ── Confluences ──────────────────────────────────────────────
 gConf          = "Confluences"
@@ -241,6 +242,8 @@ var float bullZoneTop = na
 var float bullZoneBot = na
 
 // ── Zone Boxes (one active box per direction; replaced only once tapped) ──────────────────────────────────────────────
+// Fixed width, both edges shift forward together each bar - it slides
+// across the chart at a constant size instead of stretching wider forever.
 // Runs before the signal gate below so a box tapped on this same bar can be
 // immediately replaced by a new one, instead of waiting a bar.
 if not na(bearZoneBox)
@@ -248,6 +251,7 @@ if not na(bearZoneBox)
         box.delete(bearZoneBox)
         bearZoneBox := na
     else
+        box.set_left(bearZoneBox, bar_index - boxWidthBars + 1)
         box.set_right(bearZoneBox, bar_index + 1)
 
 if not na(bullZoneBox)
@@ -255,6 +259,7 @@ if not na(bullZoneBox)
         box.delete(bullZoneBox)
         bullZoneBox := na
     else
+        box.set_left(bullZoneBox, bar_index - boxWidthBars + 1)
         box.set_right(bullZoneBox, bar_index + 1)
 
 bearZoneSignal = inSession and newBearZoneEvent and bearCount >= minConfluences and na(bearZoneBox)
@@ -267,12 +272,12 @@ bullSignal = bullZoneSignal
 if bearZoneSignal
     bearZoneTop := bearEventTop
     bearZoneBot := bearEventBot
-    bearZoneBox := box.new(bar_index, bearZoneTop, bar_index + 1, bearZoneBot, border_color = borderCol, bgcolor = bearColor, extend = extend.none)
+    bearZoneBox := box.new(bar_index - boxWidthBars + 1, bearZoneTop, bar_index + 1, bearZoneBot, border_color = borderCol, bgcolor = bearColor, extend = extend.none)
 
 if bullZoneSignal
     bullZoneTop := bullEventTop
     bullZoneBot := bullEventBot
-    bullZoneBox := box.new(bar_index, bullZoneTop, bar_index + 1, bullZoneBot, border_color = borderCol, bgcolor = bullColor, extend = extend.none)
+    bullZoneBox := box.new(bar_index - boxWidthBars + 1, bullZoneTop, bar_index + 1, bullZoneBot, border_color = borderCol, bgcolor = bullColor, extend = extend.none)
 
 alertcondition(bearSignal, "Bearish Reversal Zone", "NY Reversal Zone: bearish zone formed")
 alertcondition(bullSignal, "Bullish Reversal Zone", "NY Reversal Zone: bullish zone formed")
