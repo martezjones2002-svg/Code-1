@@ -943,7 +943,9 @@ if usePLPHC
 // while forming multiple highs or lows along the way" instead of one
 // aggressive displacement candle - implemented as 3 consecutive confirmed
 // swing lows each higher than the last (grinding up) or 3 consecutive swing
-// highs each lower than the last (grinding down).
+// highs each lower than the last (grinding down), AND only while there's
+// still a live (unswept) liquidity target on that side - otherwise normal
+// chop produces the same 3-pivot staircase with no actual draw behind it.
 
 gLiq         = "Liquidity Map"
 showLiqTable = input.bool(true, "Show Liquidity Table", group = gLiq)
@@ -1036,8 +1038,19 @@ if not na(lrlSwPH)
     lrlHigh2 := lrlHigh3
     lrlHigh3 := lrlSwPH
 
-lrlBull = not na(lrlLow1) and not na(lrlLow2) and not na(lrlLow3) and lrlLow1 < lrlLow2 and lrlLow2 < lrlLow3
-lrlBear = not na(lrlHigh1) and not na(lrlHigh2) and not na(lrlHigh3) and lrlHigh1 > lrlHigh2 and lrlHigh2 > lrlHigh3
+lrlStaircaseBull = not na(lrlLow1) and not na(lrlLow2) and not na(lrlLow3) and lrlLow1 < lrlLow2 and lrlLow2 < lrlLow3
+lrlStaircaseBear = not na(lrlHigh1) and not na(lrlHigh2) and not na(lrlHigh3) and lrlHigh1 > lrlHigh2 and lrlHigh2 > lrlHigh3
+
+// A staircase alone isn't enough - normal chop produces 3 ascending/descending
+// pivots on its own. The notes describe LRL as the market grinding TOWARD a
+// liquidity pool, so it only counts if there's still a live (unswept) target
+// on that side - an external level, or the nearer-term PHC/PH (bullish) /
+// PLC/PL (bearish) draw.
+bullTargetAbove = not noPendingAbove or (not na(phcPrice) and phcPrice > close) or (not na(phPrice) and phPrice > close)
+bearTargetBelow = not noPendingBelow or (not na(plcPrice) and plcPrice < close) or (not na(plPrice) and plPrice < close)
+
+lrlBull = lrlStaircaseBull and bullTargetAbove
+lrlBear = lrlStaircaseBear and bearTargetBelow
 
 if not na(lrlSwPL) and lrlBull
     label.new(bar_index - lrlPivotLen, lrlLow3, "LRL", style = label.style_label_up, color = color.new(color.aqua, 100), textcolor = color.aqua, size = size.tiny)
