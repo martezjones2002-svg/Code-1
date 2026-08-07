@@ -511,6 +511,138 @@ if useFSRB and not na(bearRBBox) and not na(bearRBFormedBar) and bar_index == be
         line.set_y2(bearRBPOIln, newPOI2)
         label.new(bar_index, newPOI2, "FS", style = label.style_label_down, color = color.new(color.red, 100), textcolor = color.red, size = size.tiny)
 
+// ============================================================================
+// STAGE 2c: Breaker Blocks
+// ============================================================================
+// Bullish Breaker: swing Low(A) -> swing High(B) -> Lower Low(C, sweeps below A)
+// -> close breaks back above B (structure flips up). The leg from B down to C
+// becomes the breaker zone and now acts as support.
+//
+// Bearish Breaker: swing High(A) -> swing Low(B) -> Higher High(C, sweeps above A)
+// -> close breaks back below B (structure flips down). The leg from B up to C
+// becomes the breaker zone and now acts as resistance.
+//
+// External liquidity sweep bonus: if the sweep (C) also takes out a tracked
+// external liquidity level (PDH/PDL/PWH/PWL or a session high/low), the breaker
+// is tagged "Breaker+" instead of plain "Breaker".
+//
+// Not yet implemented (follow-up pass): using the true failed order-block
+// candle instead of the full B-to-C leg as the zone.
+
+gBRK          = "Breaker Blocks"
+useBRK        = input.bool(true, "Show Breaker Blocks", group = gBRK)
+brkPivotLen   = input.int(5, "Swing pivot length (bars each side)", minval = 1, group = gBRK)
+brkSweepTicks = input.int(1, "Min sweep beyond swing (ticks)", minval = 0, group = gBRK)
+brkWidthBars  = input.int(6, "Box width (bars)", minval = 1, group = gBRK)
+bullBRKColor  = input.color(color.new(color.lime, 82), "Bullish Breaker color", group = gBRK)
+bearBRKColor  = input.color(color.new(color.maroon, 82), "Bearish Breaker color", group = gBRK)
+
+brkPH = ta.pivothigh(high, brkPivotLen, brkPivotLen)
+brkPL = ta.pivotlow(low, brkPivotLen, brkPivotLen)
+
+var float lastSwingH = na
+var float lastSwingL = na
+
+var float bullBrkCandTop  = na
+var float bullBrkCandBot  = na
+var bool  bullBrkArmed    = false
+var bool  bullBrkExtSweep = false
+
+var float bearBrkCandTop  = na
+var float bearBrkCandBot  = na
+var bool  bearBrkArmed    = false
+var bool  bearBrkExtSweep = false
+
+var box   bullBRKBox   = na
+var float bullBRKTop   = na
+var float bullBRKBot   = na
+var line  bullBRKPOIln = na
+
+var box   bearBRKBox   = na
+var float bearBRKTop   = na
+var float bearBRKBot   = na
+var line  bearBRKPOIln = na
+
+if useBRK
+    if not na(brkPL)
+        newLow = brkPL
+        if not na(lastSwingL) and not na(lastSwingH) and newLow <= lastSwingL - brkSweepTicks * tick
+            bullBrkCandTop  := lastSwingH
+            bullBrkCandBot  := newLow
+            bullBrkArmed    := true
+            bullBrkExtSweep := (not na(pdl) and newLow <= pdl) or (not na(pwl) and newLow <= pwl) or
+                                 (not na(asiaL) and newLow <= asiaL) or (not na(londonL) and newLow <= londonL) or
+                                 (not na(nyamL) and newLow <= nyamL) or (not na(nypmL) and newLow <= nypmL)
+        lastSwingL := newLow
+
+    if not na(brkPH)
+        newHigh = brkPH
+        if not na(lastSwingH) and not na(lastSwingL) and newHigh >= lastSwingH + brkSweepTicks * tick
+            bearBrkCandTop  := newHigh
+            bearBrkCandBot  := lastSwingL
+            bearBrkArmed    := true
+            bearBrkExtSweep := (not na(pdh) and newHigh >= pdh) or (not na(pwh) and newHigh >= pwh) or
+                                 (not na(asiaH) and newHigh >= asiaH) or (not na(londonH) and newHigh >= londonH) or
+                                 (not na(nyamH) and newHigh >= nyamH) or (not na(nypmH) and newHigh >= nypmH)
+        lastSwingH := newHigh
+
+    // confirmation: close breaks back through the pre-sweep swing -> spawn the breaker box
+    if bullBrkArmed and close > bullBrkCandTop
+        bullBrkArmed := false
+        if na(bullBRKBox)
+            bullBRKTop   := bullBrkCandTop
+            bullBRKBot   := bullBrkCandBot
+            ceBullBrk    = (bullBRKTop + bullBRKBot) / 2
+            bullBRKBox   := box.new(bar_index - brkWidthBars + 1, bullBRKTop, bar_index + 1, bullBRKBot, border_color = color.lime, bgcolor = bullBRKColor, extend = extend.none)
+            bullBRKPOIln := line.new(bar_index - brkWidthBars + 1, ceBullBrk, bar_index + 1, ceBullBrk, color = color.lime, width = 1, style = line.style_dashed)
+            label.new(bar_index, bullBRKBot, bullBrkExtSweep ? "Breaker+" : "Breaker", style = label.style_label_up, color = color.new(color.lime, 100), textcolor = color.lime, size = size.tiny)
+
+    if bearBrkArmed and close < bearBrkCandBot
+        bearBrkArmed := false
+        if na(bearBRKBox)
+            bearBRKTop   := bearBrkCandTop
+            bearBRKBot   := bearBrkCandBot
+            ceBearBrk    = (bearBRKTop + bearBRKBot) / 2
+            bearBRKBox   := box.new(bar_index - brkWidthBars + 1, bearBRKTop, bar_index + 1, bearBRKBot, border_color = color.maroon, bgcolor = bearBRKColor, extend = extend.none)
+            bearBRKPOIln := line.new(bar_index - brkWidthBars + 1, ceBearBrk, bar_index + 1, ceBearBrk, color = color.maroon, width = 1, style = line.style_dashed)
+            label.new(bar_index, bearBRKTop, bearBrkExtSweep ? "Breaker+" : "Breaker", style = label.style_label_down, color = color.new(color.maroon, 100), textcolor = color.maroon, size = size.tiny)
+
+// ── Bullish Breaker: invalidate / tap-check ──────────────────────────────────────────────
+if not na(bullBRKBox)
+    if close < bullBRKBot
+        // closed back below the zone -> breaker failed, remove it
+        box.delete(bullBRKBox)
+        line.delete(bullBRKPOIln)
+        bullBRKBox := na
+    else if low <= (bullBRKTop + bullBRKBot) / 2
+        // reached/passed CE -> considered used
+        box.delete(bullBRKBox)
+        line.delete(bullBRKPOIln)
+        bullBRKBox := na
+    else
+        box.set_left(bullBRKBox, bar_index - brkWidthBars + 1)
+        box.set_right(bullBRKBox, bar_index + 1)
+        line.set_x1(bullBRKPOIln, bar_index - brkWidthBars + 1)
+        line.set_x2(bullBRKPOIln, bar_index + 1)
+
+// ── Bearish Breaker: invalidate / tap-check ──────────────────────────────────────────────
+if not na(bearBRKBox)
+    if close > bearBRKTop
+        // closed back above the zone -> breaker failed, remove it
+        box.delete(bearBRKBox)
+        line.delete(bearBRKPOIln)
+        bearBRKBox := na
+    else if high >= (bearBRKTop + bearBRKBot) / 2
+        // reached/passed CE -> considered used
+        box.delete(bearBRKBox)
+        line.delete(bearBRKPOIln)
+        bearBRKBox := na
+    else
+        box.set_left(bearBRKBox, bar_index - brkWidthBars + 1)
+        box.set_right(bearBRKBox, bar_index + 1)
+        line.set_x1(bearBRKPOIln, bar_index - brkWidthBars + 1)
+        line.set_x2(bearBRKPOIln, bar_index + 1)
+
 // ── Bias Table ──────────────────────────────────────────────
 f_biasColor(ref) =>
     na(ref) ? color.gray : close > ref ? color.green : color.red
