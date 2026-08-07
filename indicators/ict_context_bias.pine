@@ -16,6 +16,14 @@ indicator("ICT Context & Bias", "ICT Bias", overlay = true, max_lines_count = 50
 tz   = "America/New_York"
 tick = syminfo.mintick
 
+// Breaker Block POI (Stage 2c) walks a dynamic-length historical range to
+// weigh wick vs. body across a swing leg - extend the lookback Pine keeps
+// for these series so that walk doesn't get silently truncated.
+max_bars_back(close, 5000)
+max_bars_back(open, 5000)
+max_bars_back(high, 5000)
+max_bars_back(low, 5000)
+
 // ── Opening Prices ──────────────────────────────────────────────
 gOpens        = "Opening Prices"
 showTrueDay   = input.bool(true, "True Day Open (00:00)", group = gOpens)
@@ -512,22 +520,24 @@ if useFSRB and not na(bearRBBox) and not na(bearRBFormedBar) and bar_index == be
         label.new(bar_index, newPOI2, "FS", style = label.style_label_down, color = color.new(color.red, 100), textcolor = color.red, size = size.tiny)
 
 // ============================================================================
-// STAGE 2c: Breaker Blocks
+// STAGE 2c: Breaker Blocks (corrected against @invisibility's Group Class #5)
 // ============================================================================
 // Bullish Breaker: swing Low(A) -> swing High(B) -> Lower Low(C, sweeps below A)
-// -> close breaks back above B (structure flips up). The leg from B down to C
-// becomes the breaker zone and now acts as support.
+// -> close breaks back above B (structure flips up). The zone is the candles
+// that produced the ORIGINAL Low(A) -> High(B) move, extended forward - not
+// the B-to-C sweep leg.
 //
 // Bearish Breaker: swing High(A) -> swing Low(B) -> Higher High(C, sweeps above A)
-// -> close breaks back below B (structure flips down). The leg from B up to C
-// becomes the breaker zone and now acts as resistance.
+// -> close breaks back below B (structure flips down). The zone is the candles
+// that produced the ORIGINAL High(A) -> Low(B) move, extended forward.
+//
+// POI: same wick-vs-body rule as Order Blocks, assessed across the whole A-to-B
+// leg - if the leg's combined wicks outweigh its combined bodies, use the
+// opening price of candle A; otherwise use CE (midpoint of the zone).
 //
 // External liquidity sweep bonus: if the sweep (C) also takes out a tracked
 // external liquidity level (PDH/PDL/PWH/PWL or a session high/low), the breaker
 // is tagged "Breaker+" instead of plain "Breaker".
-//
-// Not yet implemented (follow-up pass): using the true failed order-block
-// candle instead of the full B-to-C leg as the zone.
 
 gBRK          = "Breaker Blocks"
 useBRK        = input.bool(true, "Show Breaker Blocks", group = gBRK)
@@ -540,73 +550,122 @@ bearBRKColor  = input.color(color.new(color.maroon, 82), "Bearish Breaker color"
 brkPH = ta.pivothigh(high, brkPivotLen, brkPivotLen)
 brkPL = ta.pivotlow(low, brkPivotLen, brkPivotLen)
 
-var float lastSwingH = na
-var float lastSwingL = na
+var float lastSwingH    = na
+var float lastSwingL    = na
+var int   lastSwingHBar = na
+var int   lastSwingLBar = na
 
-var float bullBrkCandTop  = na
-var float bullBrkCandBot  = na
-var bool  bullBrkArmed    = false
+// pending bullish candidate: the A(swing low) -> B(swing high) leg, captured
+// the moment B forms; only the *sweep* trigger and confirmation are pending.
+var float bullBrkABot     = na
+var float bullBrkBTop     = na
+var int   bullBrkABar     = na
+var int   bullBrkBBar     = na
+var bool  bullBrkSwept    = false
 var bool  bullBrkExtSweep = false
 
-var float bearBrkCandTop  = na
-var float bearBrkCandBot  = na
-var bool  bearBrkArmed    = false
+// pending bearish candidate: the A(swing high) -> B(swing low) leg
+var float bearBrkATop     = na
+var float bearBrkBBot     = na
+var int   bearBrkABar     = na
+var int   bearBrkBBar     = na
+var bool  bearBrkSwept    = false
 var bool  bearBrkExtSweep = false
 
 var box   bullBRKBox   = na
 var float bullBRKTop   = na
 var float bullBRKBot   = na
+var float bullBRKPOIv  = na
 var line  bullBRKPOIln = na
 var label bullBRKLbl   = na
 
 var box   bearBRKBox   = na
 var float bearBRKTop   = na
 var float bearBRKBot   = na
+var float bearBRKPOIv  = na
 var line  bearBRKPOIln = na
 var label bearBRKLbl   = na
 
+// wick-vs-body POI across the full A-to-B leg (falls back to CE if the leg is
+// implausibly wide, to avoid requesting more historical bars than sensible)
+f_brkPOI(aBar, bBar, topVal, botVal) =>
+    off1  = bar_index - bBar
+    off2  = bar_index - aBar
+    ceVal = (topVal + botVal) / 2
+    poi = ceVal
+    if off2 < 4500 and off2 >= off1
+        sumBody = 0.0
+        sumWick = 0.0
+        for i = off1 to off2
+            sumBody += math.abs(close[i] - open[i])
+            sumWick += (high[i] - low[i]) - math.abs(close[i] - open[i])
+        poi := sumWick > sumBody ? open[off2] : ceVal
+    poi
+
 if useBRK
-    if not na(brkPL)
-        newLow = brkPL
-        if not na(lastSwingL) and not na(lastSwingH) and newLow <= lastSwingL - brkSweepTicks * tick
-            bullBrkCandTop  := lastSwingH
-            bullBrkCandBot  := newLow
-            bullBrkArmed    := true
-            bullBrkExtSweep := (not na(pdl) and newLow <= pdl) or (not na(pwl) and newLow <= pwl) or
-                                 (not na(asiaL) and newLow <= asiaL) or (not na(londonL) and newLow <= londonL) or
-                                 (not na(nyamL) and newLow <= nyamL) or (not na(nypmL) and newLow <= nypmL)
-        lastSwingL := newLow
-
+    // a new confirmed swing high -> capture the A(prior swing low) -> B(this high) candidate
     if not na(brkPH)
-        newHigh = brkPH
-        if not na(lastSwingH) and not na(lastSwingL) and newHigh >= lastSwingH + brkSweepTicks * tick
-            bearBrkCandTop  := newHigh
-            bearBrkCandBot  := lastSwingL
-            bearBrkArmed    := true
-            bearBrkExtSweep := (not na(pdh) and newHigh >= pdh) or (not na(pwh) and newHigh >= pwh) or
-                                 (not na(asiaH) and newHigh >= asiaH) or (not na(londonH) and newHigh >= londonH) or
-                                 (not na(nyamH) and newHigh >= nyamH) or (not na(nypmH) and newHigh >= nypmH)
-        lastSwingH := newHigh
+        newHigh    = brkPH
+        newHighBar = bar_index - brkPivotLen
+        if not na(lastSwingL)
+            bullBrkABot  := lastSwingL
+            bullBrkBTop  := newHigh
+            bullBrkABar  := lastSwingLBar
+            bullBrkBBar  := newHighBar
+            bullBrkSwept := false
+        lastSwingH    := newHigh
+        lastSwingHBar := newHighBar
 
-    // confirmation: close breaks back through the pre-sweep swing -> spawn the breaker box
-    if bullBrkArmed and close > bullBrkCandTop
-        bullBrkArmed := false
+    // a new confirmed swing low -> capture the A(prior swing high) -> B(this low) candidate
+    if not na(brkPL)
+        newLow    = brkPL
+        newLowBar = bar_index - brkPivotLen
+        if not na(lastSwingH)
+            bearBrkATop  := lastSwingH
+            bearBrkBBot  := newLow
+            bearBrkABar  := lastSwingHBar
+            bearBrkBBar  := newLowBar
+            bearBrkSwept := false
+        lastSwingL    := newLow
+        lastSwingLBar := newLowBar
+
+    // does this new low sweep below the pending bullish candidate's A?
+    if not na(brkPL)
+        sweepLow = brkPL
+        if not na(bullBrkABot) and not bullBrkSwept and sweepLow <= bullBrkABot - brkSweepTicks * tick
+            bullBrkSwept    := true
+            bullBrkExtSweep := (not na(pdl) and sweepLow <= pdl) or (not na(pwl) and sweepLow <= pwl) or
+                                 (not na(asiaL) and sweepLow <= asiaL) or (not na(londonL) and sweepLow <= londonL) or
+                                 (not na(nyamL) and sweepLow <= nyamL) or (not na(nypmL) and sweepLow <= nypmL)
+
+    // does this new high sweep above the pending bearish candidate's A?
+    if not na(brkPH)
+        sweepHigh = brkPH
+        if not na(bearBrkATop) and not bearBrkSwept and sweepHigh >= bearBrkATop + brkSweepTicks * tick
+            bearBrkSwept    := true
+            bearBrkExtSweep := (not na(pdh) and sweepHigh >= pdh) or (not na(pwh) and sweepHigh >= pwh) or
+                                 (not na(asiaH) and sweepHigh >= asiaH) or (not na(londonH) and sweepHigh >= londonH) or
+                                 (not na(nyamH) and sweepHigh >= nyamH) or (not na(nypmH) and sweepHigh >= nypmH)
+
+    // confirmation: close breaks back through B -> spawn the breaker using the A-to-B leg
+    if bullBrkSwept and close > bullBrkBTop
+        bullBrkSwept := false
         if na(bullBRKBox)
-            bullBRKTop   := bullBrkCandTop
-            bullBRKBot   := bullBrkCandBot
-            ceBullBrk    = (bullBRKTop + bullBRKBot) / 2
+            bullBRKTop   := bullBrkBTop
+            bullBRKBot   := bullBrkABot
+            bullBRKPOIv  := f_brkPOI(bullBrkABar, bullBrkBBar, bullBRKTop, bullBRKBot)
             bullBRKBox   := box.new(bar_index - brkWidthBars + 1, bullBRKTop, bar_index + 1, bullBRKBot, border_color = color.lime, bgcolor = bullBRKColor, extend = extend.none)
-            bullBRKPOIln := line.new(bar_index - brkWidthBars + 1, ceBullBrk, bar_index + 1, ceBullBrk, color = color.lime, width = 1, style = line.style_dashed)
+            bullBRKPOIln := line.new(bar_index - brkWidthBars + 1, bullBRKPOIv, bar_index + 1, bullBRKPOIv, color = color.lime, width = 1, style = line.style_dashed)
             bullBRKLbl   := label.new(bar_index + 1, bullBRKBot, bullBrkExtSweep ? "Breaker+" : "Breaker", style = label.style_label_up, color = color.new(color.lime, 100), textcolor = color.lime, size = size.tiny)
 
-    if bearBrkArmed and close < bearBrkCandBot
-        bearBrkArmed := false
+    if bearBrkSwept and close < bearBrkBBot
+        bearBrkSwept := false
         if na(bearBRKBox)
-            bearBRKTop   := bearBrkCandTop
-            bearBRKBot   := bearBrkCandBot
-            ceBearBrk    = (bearBRKTop + bearBRKBot) / 2
+            bearBRKTop   := bearBrkATop
+            bearBRKBot   := bearBrkBBot
+            bearBRKPOIv  := f_brkPOI(bearBrkABar, bearBrkBBar, bearBRKTop, bearBRKBot)
             bearBRKBox   := box.new(bar_index - brkWidthBars + 1, bearBRKTop, bar_index + 1, bearBRKBot, border_color = color.maroon, bgcolor = bearBRKColor, extend = extend.none)
-            bearBRKPOIln := line.new(bar_index - brkWidthBars + 1, ceBearBrk, bar_index + 1, ceBearBrk, color = color.maroon, width = 1, style = line.style_dashed)
+            bearBRKPOIln := line.new(bar_index - brkWidthBars + 1, bearBRKPOIv, bar_index + 1, bearBRKPOIv, color = color.maroon, width = 1, style = line.style_dashed)
             bearBRKLbl   := label.new(bar_index + 1, bearBRKTop, bearBrkExtSweep ? "Breaker+" : "Breaker", style = label.style_label_down, color = color.new(color.maroon, 100), textcolor = color.maroon, size = size.tiny)
 
 // ── Bullish Breaker: invalidate / tap-check ──────────────────────────────────────────────
@@ -617,8 +676,8 @@ if not na(bullBRKBox)
         line.delete(bullBRKPOIln)
         label.delete(bullBRKLbl)
         bullBRKBox := na
-    else if low <= (bullBRKTop + bullBRKBot) / 2
-        // reached/passed CE -> considered used
+    else if low <= bullBRKPOIv
+        // reached/passed its POI -> considered used
         box.delete(bullBRKBox)
         line.delete(bullBRKPOIln)
         label.delete(bullBRKLbl)
@@ -638,8 +697,8 @@ if not na(bearBRKBox)
         line.delete(bearBRKPOIln)
         label.delete(bearBRKLbl)
         bearBRKBox := na
-    else if high >= (bearBRKTop + bearBRKBot) / 2
-        // reached/passed CE -> considered used
+    else if high >= bearBRKPOIv
+        // reached/passed its POI -> considered used
         box.delete(bearBRKBox)
         line.delete(bearBRKPOIln)
         label.delete(bearBRKLbl)
@@ -650,6 +709,209 @@ if not na(bearBRKBox)
         line.set_x1(bearBRKPOIln, bar_index - brkWidthBars + 1)
         line.set_x2(bearBRKPOIln, bar_index + 1)
         label.set_x(bearBRKLbl, bar_index + 1)
+
+// ============================================================================
+// STAGE 3a: Fair Value Gaps (internal engine - feeds PLC/PHC below)
+// ============================================================================
+// Bullish FVG: 3-candle gap where low > high[2]. Bearish FVG: high < low[2].
+// Per @invisibility's IFVG definition, a FVG stays "respected" until a candle
+// CLOSES through it - a wick tag does not invalidate it (that's exactly how a
+// PLC/PHC swing is allowed to form inside one). Only the most recent
+// unmitigated FVG per direction is tracked, since that's all PLC/PHC needs.
+
+gFVG    = "Fair Value Gaps (PLC/PHC engine)"
+showFVG = input.bool(false, "Show internal FVGs (debug)", group = gFVG)
+
+bullFVGnew = low > high[2]
+bearFVGnew = high < low[2]
+
+var float bullFVGTop    = na
+var float bullFVGBot    = na
+var int   bullFVGBar    = na
+var box   bullFVGBoxViz = na
+
+var float bearFVGTop    = na
+var float bearFVGBot    = na
+var int   bearFVGBar    = na
+var box   bearFVGBoxViz = na
+
+if bullFVGnew
+    bullFVGTop := low
+    bullFVGBot := high[2]
+    bullFVGBar := bar_index
+    if not na(bullFVGBoxViz)
+        box.delete(bullFVGBoxViz)
+        bullFVGBoxViz := na
+    if showFVG
+        bullFVGBoxViz := box.new(bar_index - 2, bullFVGTop, bar_index, bullFVGBot, border_color = color.new(color.blue, 40), bgcolor = color.new(color.blue, 90), extend = extend.right)
+
+if not na(bullFVGBar) and close < bullFVGBot
+    bullFVGBar := na
+    if not na(bullFVGBoxViz)
+        box.delete(bullFVGBoxViz)
+        bullFVGBoxViz := na
+
+if bearFVGnew
+    bearFVGTop := low[2]
+    bearFVGBot := high
+    bearFVGBar := bar_index
+    if not na(bearFVGBoxViz)
+        box.delete(bearFVGBoxViz)
+        bearFVGBoxViz := na
+    if showFVG
+        bearFVGBoxViz := box.new(bar_index - 2, bearFVGTop, bar_index, bearFVGBot, border_color = color.new(color.red, 40), bgcolor = color.new(color.red, 90), extend = extend.right)
+
+if not na(bearFVGBar) and close > bearFVGTop
+    bearFVGBar := na
+    if not na(bearFVGBoxViz)
+        box.delete(bearFVGBoxViz)
+        bearFVGBoxViz := na
+
+// ============================================================================
+// STAGE 3b: Protected Low/High Catalyst (PLC/PHC) + Protected Low/High (PL/PH)
+// ============================================================================
+// PLC: a swing low that forms INSIDE an active (unmitigated) bullish FVG while
+// that FVG is being respected - the first swing low that can later cause a PL.
+// PHC: mirror, inside a bearish FVG.
+//
+// PL: forms after a PLC, when price returns and sweeps the PLC (a NEW, SEPARATE
+// swing low at/through the PLC's price), then reacts away. PH: mirror.
+//
+// Protection Range Rule: a PL is only protected from itself up to the most
+// recent internal high formed after it - once price closes through that
+// internal high, the PL is no longer treated as protected. PH: mirror with
+// internal lows.
+
+gPLPHC         = "PLC/PHC + PL/PH"
+usePLPHC       = input.bool(true, "Show PLC/PHC + PL/PH", group = gPLPHC)
+plphPivotLen   = input.int(3, "Swing pivot length (bars each side)", minval = 1, group = gPLPHC)
+plphSweepTicks = input.int(1, "Min sweep beyond catalyst (ticks)", minval = 0, group = gPLPHC)
+plcColor       = input.color(color.blue, "PLC color", group = gPLPHC)
+plColor        = input.color(color.new(color.blue, 0), "PL color", group = gPLPHC)
+phcColor       = input.color(color.orange, "PHC color", group = gPLPHC)
+phColor        = input.color(color.new(color.orange, 0), "PH color", group = gPLPHC)
+
+swPH = ta.pivothigh(high, plphPivotLen, plphPivotLen)
+swPL = ta.pivotlow(low, plphPivotLen, plphPivotLen)
+
+var float plcPrice = na
+var int   plcBar   = na
+var bool  plcActive = false
+var line  plcLine  = na
+var label plcLbl   = na
+
+var float plPrice      = na
+var int   plBar        = na
+var bool  plProtected  = false
+var float plInternalHigh = na
+var line  plLine = na
+var label plLbl  = na
+
+var float phcPrice = na
+var int   phcBar   = na
+var bool  phcActive = false
+var line  phcLine  = na
+var label phcLbl   = na
+
+var float phPrice      = na
+var int   phBar        = na
+var bool  phProtected  = false
+var float phInternalLow = na
+var line  phLine = na
+var label phLbl  = na
+
+if usePLPHC
+    // ── PL: price returns, sweeps the existing PLC, forms a new separate swing low ──
+    if plcActive and not na(swPL)
+        pivotBarPL = bar_index - plphPivotLen
+        pivotValPL = swPL
+        if pivotBarPL > plcBar and pivotValPL <= plcPrice + plphSweepTicks * tick
+            if not na(plcLine)
+                line.delete(plcLine)
+                label.delete(plcLbl)
+            if not na(plLine)
+                line.delete(plLine)
+                label.delete(plLbl)
+            plPrice        := pivotValPL
+            plBar          := pivotBarPL
+            plProtected    := true
+            plInternalHigh := na
+            plcActive      := false
+            plLine := line.new(pivotBarPL, plPrice, bar_index, plPrice, color = plColor, width = 2, style = line.style_solid, extend = extend.right)
+            plLbl  := label.new(pivotBarPL, plPrice, "PL", style = label.style_label_up, color = color.new(plColor, 100), textcolor = plColor, size = size.small)
+
+    // ── PH: price returns, sweeps the existing PHC, forms a new separate swing high ──
+    if phcActive and not na(swPH)
+        pivotBarPH = bar_index - plphPivotLen
+        pivotValPH = swPH
+        if pivotBarPH > phcBar and pivotValPH >= phcPrice - plphSweepTicks * tick
+            if not na(phcLine)
+                line.delete(phcLine)
+                label.delete(phcLbl)
+            if not na(phLine)
+                line.delete(phLine)
+                label.delete(phLbl)
+            phPrice       := pivotValPH
+            phBar         := pivotBarPH
+            phProtected   := true
+            phInternalLow := na
+            phcActive     := false
+            phLine := line.new(pivotBarPH, phPrice, bar_index, phPrice, color = phColor, width = 2, style = line.style_solid, extend = extend.right)
+            phLbl  := label.new(pivotBarPH, phPrice, "PH", style = label.style_label_down, color = color.new(phColor, 100), textcolor = phColor, size = size.small)
+
+    // ── PLC: swing low forming inside an active, respected bullish FVG ──
+    if not na(swPL)
+        pivotBarC = bar_index - plphPivotLen
+        pivotValC = swPL
+        if not na(bullFVGBar) and pivotBarC >= bullFVGBar and pivotValC <= bullFVGTop and pivotValC >= bullFVGBot
+            if not na(plcLine)
+                line.delete(plcLine)
+                label.delete(plcLbl)
+            plcPrice  := pivotValC
+            plcBar    := pivotBarC
+            plcActive := true
+            plcLine   := line.new(pivotBarC, plcPrice, bar_index, plcPrice, color = plcColor, width = 1, style = line.style_dotted, extend = extend.right)
+            plcLbl    := label.new(pivotBarC, plcPrice, "PLC", style = label.style_label_up, color = color.new(plcColor, 100), textcolor = plcColor, size = size.tiny)
+
+    // ── PHC: swing high forming inside an active, respected bearish FVG ──
+    if not na(swPH)
+        pivotBarHC = bar_index - plphPivotLen
+        pivotValHC = swPH
+        if not na(bearFVGBar) and pivotBarHC >= bearFVGBar and pivotValHC <= bearFVGTop and pivotValHC >= bearFVGBot
+            if not na(phcLine)
+                line.delete(phcLine)
+                label.delete(phcLbl)
+            phcPrice  := pivotValHC
+            phcBar    := pivotBarHC
+            phcActive := true
+            phcLine   := line.new(pivotBarHC, phcPrice, bar_index, phcPrice, color = phcColor, width = 1, style = line.style_dotted, extend = extend.right)
+            phcLbl    := label.new(pivotBarHC, phcPrice, "PHC", style = label.style_label_down, color = color.new(phcColor, 100), textcolor = phcColor, size = size.tiny)
+
+    // ── Protection Range Rule: PL protected up to the last internal high after it ──
+    if plProtected
+        if not na(swPH)
+            pivotBarIH = bar_index - plphPivotLen
+            if pivotBarIH > plBar
+                plInternalHigh := swPH
+        if not na(plInternalHigh) and close > plInternalHigh
+            plProtected := false
+            if not na(plLine)
+                line.delete(plLine)
+                label.delete(plLbl)
+                plLine := na
+
+    // ── Protection Range Rule: PH protected up to the last internal low after it ──
+    if phProtected
+        if not na(swPL)
+            pivotBarIL = bar_index - plphPivotLen
+            if pivotBarIL > phBar
+                phInternalLow := swPL
+        if not na(phInternalLow) and close < phInternalLow
+            phProtected := false
+            if not na(phLine)
+                line.delete(phLine)
+                label.delete(phLbl)
+                phLine := na
 
 // ── Bias Table ──────────────────────────────────────────────
 f_biasColor(ref) =>
