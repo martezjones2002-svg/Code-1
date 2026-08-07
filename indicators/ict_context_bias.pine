@@ -342,12 +342,18 @@ if useOB and bearOBevent and na(bearOBBox)
 // iRB forms when an RB's full range gets closed through (not just touched) -
 // it inverts, and the *new* direction's usage rule applies to the same box.
 //
-// Not yet implemented (follow-up pass): Failure Swing + RB reclassification,
-// and RB forming from a PLC/PHC rejection (only the liquidity-sweep trigger
-// is covered here).
+// Failure Swing + RB: if the candle *immediately after* an RB forms wicks
+// into the RB's range but fails to reach CE(0.5), it upgrades to FS+RB and
+// the POI shifts: if the wick reached the secondary quadrant (0.75 for
+// bullish, 0.25 for bearish), focus moves to CE; if it didn't even reach
+// that quadrant, focus moves to the quadrant itself instead of CE.
+//
+// Not yet implemented (follow-up pass): RB forming from a PLC/PHC rejection
+// (only the liquidity-sweep trigger is covered here).
 
 gRB            = "Rejection Blocks"
 useRB          = input.bool(true, "Show Rejection Blocks / iRB", group = gRB)
+useFSRB        = input.bool(true, "Reclassify as Failure Swing RB when applicable", group = gRB)
 rbWickRatio    = input.float(50, "Min wick (% of candle range)", minval = 0, maxval = 100, group = gRB) / 100
 rbSweepLookback = input.int(20, "Sweep reference lookback (bars)", minval = 5, group = gRB)
 rbSweepTicks   = input.int(1, "Min sweep beyond prior extreme (ticks)", minval = 0, group = gRB)
@@ -369,15 +375,17 @@ rbSweptLow  = not na(rbPriorLow) and low <= rbPriorLow - rbSweepTicks * tick
 bullRBevent = useRB and rbBarRange > 0 and (rbLowerWick / rbBarRange) >= rbWickRatio and rbSweptLow
 bearRBevent = useRB and rbBarRange > 0 and (rbUpperWick / rbBarRange) >= rbWickRatio and rbSweptHigh
 
-var box   bullRBBox   = na
-var float bullRBTop   = na
-var float bullRBBot   = na
-var line  bullRBPOIln = na
+var box   bullRBBox      = na
+var float bullRBTop      = na
+var float bullRBBot      = na
+var line  bullRBPOIln    = na
+var int   bullRBFormedBar = na
 
-var box   bearRBBox   = na
-var float bearRBTop   = na
-var float bearRBBot   = na
-var line  bearRBPOIln = na
+var box   bearRBBox      = na
+var float bearRBTop      = na
+var float bearRBBot      = na
+var line  bearRBPOIln    = na
+var int   bearRBFormedBar = na
 
 var box   bullIRBBox   = na
 var float bullIRBTop   = na
@@ -427,7 +435,9 @@ if not na(bullRBBox)
             ce = (bullRBTop + bullRBBot) / 2
             bearIRBBox   := box.new(bar_index - rbWidthBars + 1, bearIRBTop, bar_index + 1, bearIRBBot, border_color = color.orange, bgcolor = bearIRBColor, extend = extend.none)
             bearIRBPOIln := line.new(bar_index - rbWidthBars + 1, ce, bar_index + 1, ce, color = color.orange, width = 1, style = line.style_dashed)
-    else if low <= bullRBTop and high >= bullRBBot
+    else if low <= (bullRBTop + bullRBBot) / 2
+        // reached/passed CE -> considered consumed (a shallow wick that stops short
+        // of CE is left alive so the FS+RB check below can still evaluate it)
         box.delete(bullRBBox)
         line.delete(bullRBPOIln)
         bullRBBox := na
@@ -450,7 +460,9 @@ if not na(bearRBBox)
             ce2 = (bearRBTop + bearRBBot) / 2
             bullIRBBox   := box.new(bar_index - rbWidthBars + 1, bullIRBTop, bar_index + 1, bullIRBBot, border_color = color.blue, bgcolor = bullIRBColor, extend = extend.none)
             bullIRBPOIln := line.new(bar_index - rbWidthBars + 1, ce2, bar_index + 1, ce2, color = color.blue, width = 1, style = line.style_dashed)
-    else if low <= bearRBTop and high >= bearRBBot
+    else if high >= (bearRBTop + bearRBBot) / 2
+        // reached/passed CE -> considered consumed (a shallow wick that stops short
+        // of CE is left alive so the FS+RB check below can still evaluate it)
         box.delete(bearRBBox)
         line.delete(bearRBPOIln)
         bearRBBox := na
@@ -462,18 +474,42 @@ if not na(bearRBBox)
 
 // ── New RB formation ──────────────────────────────────────────────
 if bullRBevent and na(bullRBBox)
-    bullRBTop   := high
-    bullRBBot   := low
+    bullRBTop      := high
+    bullRBBot      := low
     ce3 = (high + low) / 2
-    bullRBBox   := box.new(bar_index - rbWidthBars + 1, bullRBTop, bar_index + 1, bullRBBot, border_color = color.teal, bgcolor = bullRBColor, extend = extend.none)
-    bullRBPOIln := line.new(bar_index - rbWidthBars + 1, ce3, bar_index + 1, ce3, color = color.teal, width = 1, style = line.style_dashed)
+    bullRBBox      := box.new(bar_index - rbWidthBars + 1, bullRBTop, bar_index + 1, bullRBBot, border_color = color.teal, bgcolor = bullRBColor, extend = extend.none)
+    bullRBPOIln    := line.new(bar_index - rbWidthBars + 1, ce3, bar_index + 1, ce3, color = color.teal, width = 1, style = line.style_dashed)
+    bullRBFormedBar := bar_index
 
 if bearRBevent and na(bearRBBox)
-    bearRBTop   := high
-    bearRBBot   := low
+    bearRBTop      := high
+    bearRBBot      := low
     ce4 = (high + low) / 2
-    bearRBBox   := box.new(bar_index - rbWidthBars + 1, bearRBTop, bar_index + 1, bearRBBot, border_color = color.red, bgcolor = bearRBColor, extend = extend.none)
-    bearRBPOIln := line.new(bar_index - rbWidthBars + 1, ce4, bar_index + 1, ce4, color = color.red, width = 1, style = line.style_dashed)
+    bearRBBox      := box.new(bar_index - rbWidthBars + 1, bearRBTop, bar_index + 1, bearRBBot, border_color = color.red, bgcolor = bearRBColor, extend = extend.none)
+    bearRBPOIln    := line.new(bar_index - rbWidthBars + 1, ce4, bar_index + 1, ce4, color = color.red, width = 1, style = line.style_dashed)
+    bearRBFormedBar := bar_index
+
+// ── Failure Swing + RB reclassification ──────────────────────────────────────────────
+// Checked exactly once, on the bar immediately after the RB forms.
+if useFSRB and not na(bullRBBox) and not na(bullRBFormedBar) and bar_index == bullRBFormedBar + 1
+    ceCheck  = (bullRBTop + bullRBBot) / 2
+    q75Check = bullRBBot + 0.75 * (bullRBTop - bullRBBot)
+    fsBull   = low < bullRBTop and low > ceCheck
+    if fsBull
+        newPOI = low <= q75Check ? ceCheck : q75Check
+        line.set_y1(bullRBPOIln, newPOI)
+        line.set_y2(bullRBPOIln, newPOI)
+        label.new(bar_index, newPOI, "FS", style = label.style_label_up, color = color.new(color.teal, 100), textcolor = color.teal, size = size.tiny)
+
+if useFSRB and not na(bearRBBox) and not na(bearRBFormedBar) and bar_index == bearRBFormedBar + 1
+    ceCheck2  = (bearRBTop + bearRBBot) / 2
+    q25Check  = bearRBBot + 0.25 * (bearRBTop - bearRBBot)
+    fsBear    = high > bearRBBot and high < ceCheck2
+    if fsBear
+        newPOI2 = high >= q25Check ? ceCheck2 : q25Check
+        line.set_y1(bearRBPOIln, newPOI2)
+        line.set_y2(bearRBPOIln, newPOI2)
+        label.new(bar_index, newPOI2, "FS", style = label.style_label_down, color = color.new(color.red, 100), textcolor = color.red, size = size.tiny)
 
 // ── Bias Table ──────────────────────────────────────────────
 f_biasColor(ref) =>
