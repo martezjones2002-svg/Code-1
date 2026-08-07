@@ -1261,8 +1261,12 @@ touchingBearNow = useSignal and f_touchingBear(low, high)
 bullOpensCount = (not na(trueDayOpen) and close < trueDayOpen ? 1 : 0) + (not na(open0830) and close < open0830 ? 1 : 0) + (not na(open0930) and close < open0930 ? 1 : 0) + (not na(open1330) and close < open1330 ? 1 : 0) + (not na(dailyOpen) and close < dailyOpen ? 1 : 0) + (not na(weeklyOpen) and close < weeklyOpen ? 1 : 0)
 bearOpensCount = (not na(trueDayOpen) and close > trueDayOpen ? 1 : 0) + (not na(open0830) and close > open0830 ? 1 : 0) + (not na(open0930) and close > open0930 ? 1 : 0) + (not na(open1330) and close > open1330 ? 1 : 0) + (not na(dailyOpen) and close > dailyOpen ? 1 : 0) + (not na(weeklyOpen) and close > weeklyOpen ? 1 : 0)
 
-bullLiquidityAligned = not noPendingAbove
-bearLiquidityAligned = not noPendingBelow
+// counts external liquidity (Stage 4) OR internal liquidity (PHC/PH above for
+// longs, PLC/PL below for shorts) as a valid draw - external-only missed
+// reversals back toward an internal level once every external pool had
+// already been swept
+bullLiquidityAligned = bullTargetAbove
+bearLiquidityAligned = bearTargetBelow
 
 bullLRLRecent = not na(lastLRLBullBar) and (bar_index - lastLRLBullBar) <= signalRecentBars
 bearLRLRecent = not na(lastLRLBearBar) and (bar_index - lastLRLBearBar) <= signalRecentBars
