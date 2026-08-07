@@ -1,5 +1,5 @@
 //@version=6
-indicator("ICT Context & Bias", "ICT Bias", overlay = true, max_lines_count = 500, max_labels_count = 50, max_boxes_count = 50)
+indicator("ICT Context & Bias", "ICT Bias", overlay = true, max_lines_count = 500, max_labels_count = 300, max_boxes_count = 300)
 
 // Stage 1 of a multi-stage build: context/bias only. No PD arrays, no entry
 // signals yet - this just automates the manual markup (opening prices,
@@ -367,9 +367,24 @@ if useOB and bearOBevent and na(bearOBBox)
 // bullish, 0.25 for bearish), focus moves to CE; if it didn't even reach
 // that quadrant, focus moves to the quadrant itself instead of CE.
 //
+// RB/iRB now track up to rbMaxZones concurrent zones PER DIRECTION instead
+// of one. A single-slot design silently blocked new, valid RBs from forming
+// any time an older one was still sitting unconsumed - common during a
+// fast, one-directional move where several genuine rejection wicks print in
+// a row. Zones extend right from their own formation bar instead of sliding
+// to hug the current bar, since with several zones live at once there's no
+// single "current" position to slide to.
+//
 // Not yet implemented (follow-up pass): RB rejecting another RB (the rare
 // case, only valid once price has already traded through the original RB's
 // CE).
+
+type RBZone
+    box   b
+    line  poiLn
+    float top
+    float bot
+    int   formedBar
 
 gRB            = "Rejection Blocks"
 useRB          = input.bool(true, "Show Rejection Blocks / iRB", group = gRB)
@@ -377,7 +392,8 @@ useFSRB        = input.bool(true, "Reclassify as Failure Swing RB when applicabl
 rbWickRatio    = input.float(50, "Min wick (% of candle range)", minval = 0, maxval = 100, group = gRB) / 100
 rbSweepLookback = input.int(20, "Sweep reference lookback (bars)", minval = 5, group = gRB)
 rbSweepTicks   = input.int(1, "Min sweep beyond prior extreme (ticks)", minval = 0, group = gRB)
-rbWidthBars    = input.int(6, "RB/iRB box width (bars)", minval = 1, group = gRB)
+rbWidthBars    = input.int(6, "RB/iRB box width at formation (bars)", minval = 1, group = gRB)
+rbMaxZones     = input.int(10, "Max concurrent RB/iRB zones per direction", minval = 1, group = gRB)
 bullRBColor    = input.color(color.new(color.teal, 85), "Bullish RB color", group = gRB)
 bearRBColor    = input.color(color.new(color.red, 85), "Bearish RB color", group = gRB)
 bullIRBColor   = input.color(color.new(color.blue, 80), "Bullish iRB color", group = gRB)
@@ -404,148 +420,110 @@ bearRBTouchPHC = not na(phcPrice) and high >= phcPrice and low <= phcPrice
 bullRBevent = useRB and rbBarRange > 0 and (rbLowerWick / rbBarRange) >= rbWickRatio and (rbSweptLow or bullRBTouchPL or bullRBTouchPLC)
 bearRBevent = useRB and rbBarRange > 0 and (rbUpperWick / rbBarRange) >= rbWickRatio and (rbSweptHigh or bearRBTouchPH or bearRBTouchPHC)
 
-var box   bullRBBox      = na
-var float bullRBTop      = na
-var float bullRBBot      = na
-var line  bullRBPOIln    = na
-var int   bullRBFormedBar = na
+var array<RBZone> bullRBZones  = array.new<RBZone>()
+var array<RBZone> bearRBZones  = array.new<RBZone>()
+var array<RBZone> bullIRBZones = array.new<RBZone>()
+var array<RBZone> bearIRBZones = array.new<RBZone>()
 
-var box   bearRBBox      = na
-var float bearRBTop      = na
-var float bearRBBot      = na
-var line  bearRBPOIln    = na
-var int   bearRBFormedBar = na
-
-var box   bullIRBBox   = na
-var float bullIRBTop   = na
-var float bullIRBBot   = na
-var line  bullIRBPOIln = na
-
-var box   bearIRBBox   = na
-var float bearIRBTop   = na
-var float bearIRBBot   = na
-var line  bearIRBPOIln = na
+f_rbNew(left, top, bot, col) =>
+    ce = (top + bot) / 2
+    b  = box.new(left, top, bar_index + 1, bot, border_color = col, bgcolor = color.new(col, 80), extend = extend.right)
+    ln = line.new(left, ce, bar_index + 1, ce, color = col, width = 1, style = line.style_dashed, extend = extend.right)
+    RBZone.new(b = b, poiLn = ln, top = top, bot = bot, formedBar = bar_index)
 
 // ── iRB: plain tap-check first (runs before RB invert-check below, so a
 // freshly-spawned iRB this bar isn't immediately self-tapped by the same
 // bar's data that created it) ──────────────────────────────────────────────
-if not na(bullIRBBox)
-    if low <= bullIRBTop and high >= bullIRBBot
-        box.delete(bullIRBBox)
-        line.delete(bullIRBPOIln)
-        bullIRBBox := na
-    else
-        box.set_left(bullIRBBox, bar_index - rbWidthBars + 1)
-        box.set_right(bullIRBBox, bar_index + 1)
-        line.set_x1(bullIRBPOIln, bar_index - rbWidthBars + 1)
-        line.set_x2(bullIRBPOIln, bar_index + 1)
+if array.size(bullIRBZones) > 0
+    for idx = array.size(bullIRBZones) - 1 to 0
+        zoneBI = array.get(bullIRBZones, idx)
+        if low <= zoneBI.top and high >= zoneBI.bot
+            box.delete(zoneBI.b)
+            line.delete(zoneBI.poiLn)
+            array.remove(bullIRBZones, idx)
 
-if not na(bearIRBBox)
-    if low <= bearIRBTop and high >= bearIRBBot
-        box.delete(bearIRBBox)
-        line.delete(bearIRBPOIln)
-        bearIRBBox := na
-    else
-        box.set_left(bearIRBBox, bar_index - rbWidthBars + 1)
-        box.set_right(bearIRBBox, bar_index + 1)
-        line.set_x1(bearIRBPOIln, bar_index - rbWidthBars + 1)
-        line.set_x2(bearIRBPOIln, bar_index + 1)
+if array.size(bearIRBZones) > 0
+    for idx = array.size(bearIRBZones) - 1 to 0
+        zoneRI = array.get(bearIRBZones, idx)
+        if low <= zoneRI.top and high >= zoneRI.bot
+            box.delete(zoneRI.b)
+            line.delete(zoneRI.poiLn)
+            array.remove(bearIRBZones, idx)
 
 // ── Bullish RB: tap / invert-check ──────────────────────────────────────────────
-if not na(bullRBBox)
-    if close < bullRBBot
-        // closed fully through -> inverts to a bearish iRB (use bottom+CE, not top)
-        box.delete(bullRBBox)
-        line.delete(bullRBPOIln)
-        bullRBBox := na
-        if na(bearIRBBox)
-            bearIRBTop  := bullRBTop
-            bearIRBBot  := bullRBBot
-            ce = (bullRBTop + bullRBBot) / 2
-            bearIRBBox   := box.new(bar_index - rbWidthBars + 1, bearIRBTop, bar_index + 1, bearIRBBot, border_color = color.orange, bgcolor = bearIRBColor, extend = extend.none)
-            bearIRBPOIln := line.new(bar_index - rbWidthBars + 1, ce, bar_index + 1, ce, color = color.orange, width = 1, style = line.style_dashed)
-    else if low <= (bullRBTop + bullRBBot) / 2
-        // reached/passed CE -> considered consumed (a shallow wick that stops short
-        // of CE is left alive so the FS+RB check below can still evaluate it)
-        box.delete(bullRBBox)
-        line.delete(bullRBPOIln)
-        bullRBBox := na
-    else
-        box.set_left(bullRBBox, bar_index - rbWidthBars + 1)
-        box.set_right(bullRBBox, bar_index + 1)
-        line.set_x1(bullRBPOIln, bar_index - rbWidthBars + 1)
-        line.set_x2(bullRBPOIln, bar_index + 1)
+if array.size(bullRBZones) > 0
+    for idx = array.size(bullRBZones) - 1 to 0
+        zoneBR = array.get(bullRBZones, idx)
+        if close < zoneBR.bot
+            // closed fully through -> inverts to a bearish iRB (use bottom+CE, not top)
+            box.delete(zoneBR.b)
+            line.delete(zoneBR.poiLn)
+            array.remove(bullRBZones, idx)
+            if array.size(bearIRBZones) < rbMaxZones
+                array.push(bearIRBZones, f_rbNew(zoneBR.formedBar, zoneBR.top, zoneBR.bot, color.orange))
+        else if low <= (zoneBR.top + zoneBR.bot) / 2
+            // reached/passed CE -> considered consumed (a shallow wick that stops short
+            // of CE is left alive so the FS+RB check below can still evaluate it)
+            box.delete(zoneBR.b)
+            line.delete(zoneBR.poiLn)
+            array.remove(bullRBZones, idx)
 
 // ── Bearish RB: tap / invert-check ──────────────────────────────────────────────
-if not na(bearRBBox)
-    if close > bearRBTop
-        // closed fully through -> inverts to a bullish iRB (use top+CE, not bottom)
-        box.delete(bearRBBox)
-        line.delete(bearRBPOIln)
-        bearRBBox := na
-        if na(bullIRBBox)
-            bullIRBTop  := bearRBTop
-            bullIRBBot  := bearRBBot
-            ce2 = (bearRBTop + bearRBBot) / 2
-            bullIRBBox   := box.new(bar_index - rbWidthBars + 1, bullIRBTop, bar_index + 1, bullIRBBot, border_color = color.blue, bgcolor = bullIRBColor, extend = extend.none)
-            bullIRBPOIln := line.new(bar_index - rbWidthBars + 1, ce2, bar_index + 1, ce2, color = color.blue, width = 1, style = line.style_dashed)
-    else if high >= (bearRBTop + bearRBBot) / 2
-        // reached/passed CE -> considered consumed (a shallow wick that stops short
-        // of CE is left alive so the FS+RB check below can still evaluate it)
-        box.delete(bearRBBox)
-        line.delete(bearRBPOIln)
-        bearRBBox := na
-    else
-        box.set_left(bearRBBox, bar_index - rbWidthBars + 1)
-        box.set_right(bearRBBox, bar_index + 1)
-        line.set_x1(bearRBPOIln, bar_index - rbWidthBars + 1)
-        line.set_x2(bearRBPOIln, bar_index + 1)
+if array.size(bearRBZones) > 0
+    for idx = array.size(bearRBZones) - 1 to 0
+        zoneRR = array.get(bearRBZones, idx)
+        if close > zoneRR.top
+            // closed fully through -> inverts to a bullish iRB (use top+CE, not bottom)
+            box.delete(zoneRR.b)
+            line.delete(zoneRR.poiLn)
+            array.remove(bearRBZones, idx)
+            if array.size(bullIRBZones) < rbMaxZones
+                array.push(bullIRBZones, f_rbNew(zoneRR.formedBar, zoneRR.top, zoneRR.bot, color.blue))
+        else if high >= (zoneRR.top + zoneRR.bot) / 2
+            box.delete(zoneRR.b)
+            line.delete(zoneRR.poiLn)
+            array.remove(bearRBZones, idx)
 
 // ── New RB formation ──────────────────────────────────────────────
-if bullRBevent and na(bullRBBox)
-    bullRBTop      := high
-    bullRBBot      := low
-    ce3 = (high + low) / 2
-    bullRBBox      := box.new(bar_index - rbWidthBars + 1, bullRBTop, bar_index + 1, bullRBBot, border_color = color.teal, bgcolor = bullRBColor, extend = extend.none)
-    bullRBPOIln    := line.new(bar_index - rbWidthBars + 1, ce3, bar_index + 1, ce3, color = color.teal, width = 1, style = line.style_dashed)
-    bullRBFormedBar := bar_index
+if bullRBevent and array.size(bullRBZones) < rbMaxZones
+    array.push(bullRBZones, f_rbNew(bar_index - rbWidthBars + 1, high, low, color.teal))
     if not rbSweptLow
         // formed from a PLC/PHC or PL/PH rejection instead of a liquidity sweep -
         // tagged so the new pathway is visually distinguishable from the
         // already-verified sweep-based RBs during testing
         label.new(bar_index, low, bullRBTouchPL ? "RB-PL" : "RB-PLC", style = label.style_label_up, color = color.new(color.teal, 100), textcolor = color.teal, size = size.tiny)
 
-if bearRBevent and na(bearRBBox)
-    bearRBTop      := high
-    bearRBBot      := low
-    ce4 = (high + low) / 2
-    bearRBBox      := box.new(bar_index - rbWidthBars + 1, bearRBTop, bar_index + 1, bearRBBot, border_color = color.red, bgcolor = bearRBColor, extend = extend.none)
-    bearRBPOIln    := line.new(bar_index - rbWidthBars + 1, ce4, bar_index + 1, ce4, color = color.red, width = 1, style = line.style_dashed)
-    bearRBFormedBar := bar_index
+if bearRBevent and array.size(bearRBZones) < rbMaxZones
+    array.push(bearRBZones, f_rbNew(bar_index - rbWidthBars + 1, high, low, color.red))
     if not rbSweptHigh
         label.new(bar_index, high, bearRBTouchPH ? "RB-PH" : "RB-PHC", style = label.style_label_down, color = color.new(color.red, 100), textcolor = color.red, size = size.tiny)
 
 // ── Failure Swing + RB reclassification ──────────────────────────────────────────────
-// Checked exactly once, on the bar immediately after the RB forms.
-if useFSRB and not na(bullRBBox) and not na(bullRBFormedBar) and bar_index == bullRBFormedBar + 1
-    ceCheck  = (bullRBTop + bullRBBot) / 2
-    q75Check = bullRBBot + 0.75 * (bullRBTop - bullRBBot)
-    fsBull   = low < bullRBTop and low > ceCheck
-    if fsBull
-        newPOI = low <= q75Check ? ceCheck : q75Check
-        line.set_y1(bullRBPOIln, newPOI)
-        line.set_y2(bullRBPOIln, newPOI)
-        label.new(bar_index, newPOI, "FS", style = label.style_label_up, color = color.new(color.teal, 100), textcolor = color.teal, size = size.tiny)
+// Checked exactly once, on the bar immediately after an RB forms - only
+// ever applies to the most recently formed zone per direction.
+if useFSRB and array.size(bullRBZones) > 0
+    lastBull = array.get(bullRBZones, array.size(bullRBZones) - 1)
+    if bar_index == lastBull.formedBar + 1
+        ceCheck  = (lastBull.top + lastBull.bot) / 2
+        q75Check = lastBull.bot + 0.75 * (lastBull.top - lastBull.bot)
+        fsBull   = low < lastBull.top and low > ceCheck
+        if fsBull
+            newPOI = low <= q75Check ? ceCheck : q75Check
+            line.set_y1(lastBull.poiLn, newPOI)
+            line.set_y2(lastBull.poiLn, newPOI)
+            label.new(bar_index, newPOI, "FS", style = label.style_label_up, color = color.new(color.teal, 100), textcolor = color.teal, size = size.tiny)
 
-if useFSRB and not na(bearRBBox) and not na(bearRBFormedBar) and bar_index == bearRBFormedBar + 1
-    ceCheck2  = (bearRBTop + bearRBBot) / 2
-    q25Check  = bearRBBot + 0.25 * (bearRBTop - bearRBBot)
-    fsBear    = high > bearRBBot and high < ceCheck2
-    if fsBear
-        newPOI2 = high >= q25Check ? ceCheck2 : q25Check
-        line.set_y1(bearRBPOIln, newPOI2)
-        line.set_y2(bearRBPOIln, newPOI2)
-        label.new(bar_index, newPOI2, "FS", style = label.style_label_down, color = color.new(color.red, 100), textcolor = color.red, size = size.tiny)
+if useFSRB and array.size(bearRBZones) > 0
+    lastBear = array.get(bearRBZones, array.size(bearRBZones) - 1)
+    if bar_index == lastBear.formedBar + 1
+        ceCheck2  = (lastBear.top + lastBear.bot) / 2
+        q25Check  = lastBear.bot + 0.25 * (lastBear.top - lastBear.bot)
+        fsBear    = high > lastBear.bot and high < ceCheck2
+        if fsBear
+            newPOI2 = high >= q25Check ? ceCheck2 : q25Check
+            line.set_y1(lastBear.poiLn, newPOI2)
+            line.set_y2(lastBear.poiLn, newPOI2)
+            label.new(bar_index, newPOI2, "FS", style = label.style_label_down, color = color.new(color.red, 100), textcolor = color.red, size = size.tiny)
 
 // ============================================================================
 // STAGE 2c: Breaker Blocks (corrected against @invisibility's Group Class #5)
