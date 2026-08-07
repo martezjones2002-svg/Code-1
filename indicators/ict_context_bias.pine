@@ -1134,15 +1134,18 @@ var bool  tsBearArmed = false
 var float tsBearSTH   = na
 var int   tsBearBar   = na
 
-// arm using the current (pre-update) short-term high/low
+// arm: this bar pokes marginally beyond the tracked short-term high/low -
+// per the notes, that poke ITSELF "creates a short term high or low" - so
+// the level to watch for a reclaim through is THIS BAR's own extreme, not
+// the old pre-poke level.
 if useTS and not na(tsLastSTL) and low <= tsLastSTL - tsSweepTicks * tick and not tsBullArmed
     tsBullArmed := true
-    tsBullSTL   := tsLastSTL
+    tsBullSTL   := low
     tsBullBar   := bar_index
 
 if useTS and not na(tsLastSTH) and high >= tsLastSTH + tsSweepTicks * tick and not tsBearArmed
     tsBearArmed := true
-    tsBearSTH   := tsLastSTH
+    tsBearSTH   := high
     tsBearBar   := bar_index
 
 // update the trackers for future bars
@@ -1151,15 +1154,16 @@ if not na(tsSwPH)
 if not na(tsSwPL)
     tsLastSTL := tsSwPL
 
-// confirm (reclaim) or expire
-if tsBullArmed
+// confirm (reclaim, strictly on a later bar - same-bar close is always on
+// the far side of its own wick, which isn't a real reversal) or expire
+if tsBullArmed and bar_index > tsBullBar
     if close > tsBullSTL
         label.new(bar_index, low, "TS", style = label.style_label_up, color = color.new(color.teal, 100), textcolor = color.teal, size = size.tiny)
         tsBullArmed := false
     else if bar_index - tsBullBar > tsConfirmBars
         tsBullArmed := false
 
-if tsBearArmed
+if tsBearArmed and bar_index > tsBearBar
     if close < tsBearSTH
         label.new(bar_index, high, "TS", style = label.style_label_down, color = color.new(color.red, 100), textcolor = color.red, size = size.tiny)
         tsBearArmed := false
