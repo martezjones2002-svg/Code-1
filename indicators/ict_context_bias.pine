@@ -1068,6 +1068,104 @@ if showLiqTable and barstate.islast
     table.cell(liqTable, 0, 2, "RS Distance", text_color = color.white, bgcolor = color.new(color.gray, 40))
     table.cell(liqTable, 1, 2, na(rsDistanceTicks) ? "-" : (rsRealistic ? "Realistic (" + str.tostring(math.round(rsDistanceTicks)) + "t)" : "Too Far (" + str.tostring(math.round(rsDistanceTicks)) + "t)"), text_color = color.white, bgcolor = na(rsDistanceTicks) ? color.new(color.gray, 60) : (rsRealistic ? color.new(color.green, 40) : color.new(color.red, 40)))
 
+// ============================================================================
+// STAGE 5a: Change of Structure (CoS) & Turtle Soup
+// ============================================================================
+// Change of Structure: "price closes through a swing high or swing low,
+// showing a potential shift in direction." Fires once per swing point (the
+// tracked swing resets after it breaks, so it doesn't refire every bar
+// while price stays beyond it).
+//
+// Turtle Soup: "price slightly edges a point of interest creating a short
+// term high or low, then trades through that short term high or low and
+// into the point of interest" - implemented as a marginal poke (>=1 tick)
+// beyond a short-term swing high/low that reclaims back through it within
+// tsConfirmBars bars.
+//
+// Both are standalone confirmation-layer signals for now (Stage 5b wires
+// them into the full 5-step entry sequence with what's already built).
+
+gCOS          = "Change of Structure & Turtle Soup"
+useCOS        = input.bool(true, "Show Change of Structure (CoS)", group = gCOS)
+cosPivotLen   = input.int(5, "CoS swing pivot length (bars each side)", minval = 1, group = gCOS)
+useTS         = input.bool(true, "Show Turtle Soup", group = gCOS)
+tsPivotLen    = input.int(2, "Turtle Soup short-term pivot length (bars each side)", minval = 1, group = gCOS)
+tsSweepTicks  = input.int(1, "Min poke beyond short-term high/low (ticks)", minval = 0, group = gCOS)
+tsConfirmBars = input.int(3, "Max bars to reclaim after the poke", minval = 1, group = gCOS)
+
+// ── Change of Structure ──────────────────────────────────────────────
+cosSwPH = ta.pivothigh(high, cosPivotLen, cosPivotLen)
+cosSwPL = ta.pivotlow(low, cosPivotLen, cosPivotLen)
+
+var float cosLastSwingH = na
+var float cosLastSwingL = na
+
+cosBull = useCOS and not na(cosLastSwingH) and close > cosLastSwingH
+cosBear = useCOS and not na(cosLastSwingL) and close < cosLastSwingL
+
+if cosBull
+    label.new(bar_index, low, "CoS", style = label.style_label_up, color = color.new(color.lime, 100), textcolor = color.lime, size = size.tiny)
+if cosBear
+    label.new(bar_index, high, "CoS", style = label.style_label_down, color = color.new(color.red, 100), textcolor = color.red, size = size.tiny)
+
+// update after the break-check: consume if just broken, else track the newest pivot
+if cosBull
+    cosLastSwingH := na
+else if not na(cosSwPH)
+    cosLastSwingH := cosSwPH
+
+if cosBear
+    cosLastSwingL := na
+else if not na(cosSwPL)
+    cosLastSwingL := cosSwPL
+
+// ── Turtle Soup ──────────────────────────────────────────────
+tsSwPH = ta.pivothigh(high, tsPivotLen, tsPivotLen)
+tsSwPL = ta.pivotlow(low, tsPivotLen, tsPivotLen)
+
+var float tsLastSTH = na
+var float tsLastSTL = na
+
+var bool  tsBullArmed = false
+var float tsBullSTL   = na
+var int   tsBullBar   = na
+
+var bool  tsBearArmed = false
+var float tsBearSTH   = na
+var int   tsBearBar   = na
+
+// arm using the current (pre-update) short-term high/low
+if useTS and not na(tsLastSTL) and low <= tsLastSTL - tsSweepTicks * tick and not tsBullArmed
+    tsBullArmed := true
+    tsBullSTL   := tsLastSTL
+    tsBullBar   := bar_index
+
+if useTS and not na(tsLastSTH) and high >= tsLastSTH + tsSweepTicks * tick and not tsBearArmed
+    tsBearArmed := true
+    tsBearSTH   := tsLastSTH
+    tsBearBar   := bar_index
+
+// update the trackers for future bars
+if not na(tsSwPH)
+    tsLastSTH := tsSwPH
+if not na(tsSwPL)
+    tsLastSTL := tsSwPL
+
+// confirm (reclaim) or expire
+if tsBullArmed
+    if close > tsBullSTL
+        label.new(bar_index, low, "TS", style = label.style_label_up, color = color.new(color.teal, 100), textcolor = color.teal, size = size.tiny)
+        tsBullArmed := false
+    else if bar_index - tsBullBar > tsConfirmBars
+        tsBullArmed := false
+
+if tsBearArmed
+    if close < tsBearSTH
+        label.new(bar_index, high, "TS", style = label.style_label_down, color = color.new(color.red, 100), textcolor = color.red, size = size.tiny)
+        tsBearArmed := false
+    else if bar_index - tsBearBar > tsConfirmBars
+        tsBearArmed := false
+
 // ── Bias Table ──────────────────────────────────────────────
 f_biasColor(ref) =>
     na(ref) ? color.gray : close > ref ? color.green : color.red
