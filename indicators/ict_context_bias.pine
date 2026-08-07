@@ -159,6 +159,8 @@ f_drawHLOnChange(vH, vL, show, col, lblH, lblL, lstyle) =>
     var float lL = na
     var line lnH = na
     var line lnL = na
+    var label laH = na
+    var label laL = na
     changed = not na(vH) and (na(lH) or vH != lH)
     if changed
         lH := vH
@@ -166,11 +168,13 @@ f_drawHLOnChange(vH, vL, show, col, lblH, lblL, lstyle) =>
         if not na(lnH)
             line.delete(lnH)
             line.delete(lnL)
+            label.delete(laH)
+            label.delete(laL)
         if show
             lnH := line.new(bar_index, lH, bar_index + 1, lH, extend = extend.right, color = col, width = lineWidth, style = lstyle)
             lnL := line.new(bar_index, lL, bar_index + 1, lL, extend = extend.right, color = col, width = lineWidth, style = lstyle)
-            label.new(bar_index, lH, lblH, style = label.style_label_left, color = color.new(col, 100), textcolor = col, size = size.small)
-            label.new(bar_index, lL, lblL, style = label.style_label_left, color = color.new(col, 100), textcolor = col, size = size.small)
+            laH := label.new(bar_index, lH, lblH, style = label.style_label_left, color = color.new(col, 100), textcolor = col, size = size.small)
+            laL := label.new(bar_index, lL, lblL, style = label.style_label_left, color = color.new(col, 100), textcolor = col, size = size.small)
     [lH, lL]
 
 // ── Opening Price Lines ──────────────────────────────────────────────
