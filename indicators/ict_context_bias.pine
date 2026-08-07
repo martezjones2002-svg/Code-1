@@ -1052,11 +1052,16 @@ bearTargetBelow = not noPendingBelow or (not na(plcPrice) and plcPrice < close) 
 lrlBull = lrlStaircaseBull and bullTargetAbove
 lrlBear = lrlStaircaseBear and bearTargetBelow
 
+var int lastLRLBullBar = na
+var int lastLRLBearBar = na
+
 if not na(lrlSwPL) and lrlBull
     label.new(bar_index - lrlPivotLen, lrlLow3, "LRL", style = label.style_label_up, color = color.new(color.aqua, 100), textcolor = color.aqua, size = size.tiny)
+    lastLRLBullBar := bar_index
 
 if not na(lrlSwPH) and lrlBear
     label.new(bar_index - lrlPivotLen, lrlHigh3, "LRL", style = label.style_label_down, color = color.new(color.aqua, 100), textcolor = color.aqua, size = size.tiny)
+    lastLRLBearBar := bar_index
 
 var table liqTable = table.new(position.top_right, 2, 3, bgcolor = color.new(color.black, 20), border_width = 1, border_color = color.gray)
 
@@ -1156,9 +1161,13 @@ if not na(tsSwPL)
 
 // confirm (reclaim, strictly on a later bar - same-bar close is always on
 // the far side of its own wick, which isn't a real reversal) or expire
+var int lastTSBullBar = na
+var int lastTSBearBar = na
+
 if tsBullArmed and bar_index > tsBullBar
     if close > tsBullSTL
         label.new(bar_index, low, "TS", style = label.style_label_up, color = color.new(color.teal, 100), textcolor = color.teal, size = size.tiny)
+        lastTSBullBar := bar_index
         tsBullArmed := false
     else if bar_index - tsBullBar > tsConfirmBars
         tsBullArmed := false
@@ -1166,9 +1175,118 @@ if tsBullArmed and bar_index > tsBullBar
 if tsBearArmed and bar_index > tsBearBar
     if close < tsBearSTH
         label.new(bar_index, high, "TS", style = label.style_label_down, color = color.new(color.red, 100), textcolor = color.red, size = size.tiny)
+        lastTSBearBar := bar_index
         tsBearArmed := false
     else if bar_index - tsBearBar > tsConfirmBars
         tsBearArmed := false
+
+// ============================================================================
+// STAGE 5b: Limit vs. Confirmation Signal
+// ============================================================================
+// Group Class 4's rule for when a limit order is justified: "the default
+// should always be to wait for confirmation unless both of the following
+// are met: (1) a clear low resistance liquidity run into the level, (2) a
+// short-term high or low forming just before the level. If either is
+// missing, wait for confirmation. There are no exceptions." Combined with
+// Group Class 2's limit-order conditions (aligned liquidity target + correct
+// side of opening prices).
+//
+// LIMIT signal: price is touching a POI (OB/RB/iRB/Breaker/PLC/PL) AND
+// liquidity is aligned in that direction AND LRL fired recently AND Turtle
+// Soup fired recently.
+// WAIT signal: POI + aligned liquidity, but LRL or TS missing - needs
+// CoS/IFVG confirmation + retracement before entering (Stage 5c, not yet
+// built - this pass only covers the limit-vs-wait decision, not the full
+// confirmation entry sequence).
+//
+// Known simplification: "LRL/TS fired recently" checks TIME (within N bars),
+// not that it happened at THIS specific POI's price - fine most of the time
+// since they tend to cluster near the same move, but not a strict guarantee.
+// This also only evaluates the CURRENT chart's timeframe, not the notes'
+// full 4H-to-5m cross-timeframe refinement - read it as "does this qualify
+// on the timeframe I'm looking at right now."
+
+gSignal           = "Entry Signal"
+useSignal         = input.bool(true, "Show Limit/Wait Signal", group = gSignal)
+signalRecentBars  = input.int(15, "Max bars for LRL/TS to still count as \"recent\"", minval = 1, group = gSignal)
+signalOpensNeeded = input.int(3, "Min opening prices on correct side (of 6)", minval = 0, maxval = 6, group = gSignal)
+
+f_touchingBull(lo, hi) =>
+    t = false
+    if not na(bullOBBox) and lo <= bullOBTopV and hi >= bullOBBotV
+        t := true
+    if not na(bullBRKBox) and lo <= bullBRKTop and hi >= bullBRKBot
+        t := true
+    if array.size(bullRBZones) > 0
+        for idx = 0 to array.size(bullRBZones) - 1
+            z = array.get(bullRBZones, idx)
+            if lo <= z.top and hi >= z.bot
+                t := true
+    if array.size(bullIRBZones) > 0
+        for idx = 0 to array.size(bullIRBZones) - 1
+            z = array.get(bullIRBZones, idx)
+            if lo <= z.top and hi >= z.bot
+                t := true
+    if not na(plPrice) and lo <= plPrice and hi >= plPrice
+        t := true
+    if not na(plcPrice) and lo <= plcPrice and hi >= plcPrice
+        t := true
+    t
+
+f_touchingBear(lo, hi) =>
+    t = false
+    if not na(bearOBBox) and lo <= bearOBTopV and hi >= bearOBBotV
+        t := true
+    if not na(bearBRKBox) and lo <= bearBRKTop and hi >= bearBRKBot
+        t := true
+    if array.size(bearRBZones) > 0
+        for idx = 0 to array.size(bearRBZones) - 1
+            z = array.get(bearRBZones, idx)
+            if lo <= z.top and hi >= z.bot
+                t := true
+    if array.size(bearIRBZones) > 0
+        for idx = 0 to array.size(bearIRBZones) - 1
+            z = array.get(bearIRBZones, idx)
+            if lo <= z.top and hi >= z.bot
+                t := true
+    if not na(phPrice) and lo <= phPrice and hi >= phPrice
+        t := true
+    if not na(phcPrice) and lo <= phcPrice and hi >= phcPrice
+        t := true
+    t
+
+touchingBullNow = useSignal and f_touchingBull(low, high)
+touchingBearNow = useSignal and f_touchingBear(low, high)
+
+bullOpensCount = (not na(trueDayOpen) and close < trueDayOpen ? 1 : 0) + (not na(open0830) and close < open0830 ? 1 : 0) + (not na(open0930) and close < open0930 ? 1 : 0) + (not na(open1330) and close < open1330 ? 1 : 0) + (not na(dailyOpen) and close < dailyOpen ? 1 : 0) + (not na(weeklyOpen) and close < weeklyOpen ? 1 : 0)
+bearOpensCount = (not na(trueDayOpen) and close > trueDayOpen ? 1 : 0) + (not na(open0830) and close > open0830 ? 1 : 0) + (not na(open0930) and close > open0930 ? 1 : 0) + (not na(open1330) and close > open1330 ? 1 : 0) + (not na(dailyOpen) and close > dailyOpen ? 1 : 0) + (not na(weeklyOpen) and close > weeklyOpen ? 1 : 0)
+
+bullLiquidityAligned = not noPendingAbove
+bearLiquidityAligned = not noPendingBelow
+
+bullLRLRecent = not na(lastLRLBullBar) and (bar_index - lastLRLBullBar) <= signalRecentBars
+bearLRLRecent = not na(lastLRLBearBar) and (bar_index - lastLRLBearBar) <= signalRecentBars
+bullTSRecent  = not na(lastTSBullBar) and (bar_index - lastTSBullBar) <= signalRecentBars
+bearTSRecent  = not na(lastTSBearBar) and (bar_index - lastTSBearBar) <= signalRecentBars
+
+bullQualifies = touchingBullNow and bullLiquidityAligned and bullOpensCount >= signalOpensNeeded
+bearQualifies = touchingBearNow and bearLiquidityAligned and bearOpensCount >= signalOpensNeeded
+
+bullLimitReady = bullQualifies and bullLRLRecent and bullTSRecent
+bearLimitReady = bearQualifies and bearLRLRecent and bearTSRecent
+
+// fire once per touch, not every bar while price sits inside the zone
+if bullQualifies and not touchingBullNow[1]
+    if bullLimitReady
+        label.new(bar_index, low, "LIMIT\nLONG", style = label.style_label_up, color = color.new(color.green, 20), textcolor = color.white, size = size.normal)
+    else
+        label.new(bar_index, low, "WAIT\n(long)", style = label.style_label_up, color = color.new(color.gray, 30), textcolor = color.white, size = size.small)
+
+if bearQualifies and not touchingBearNow[1]
+    if bearLimitReady
+        label.new(bar_index, high, "LIMIT\nSHORT", style = label.style_label_down, color = color.new(color.red, 20), textcolor = color.white, size = size.normal)
+    else
+        label.new(bar_index, high, "WAIT\n(short)", style = label.style_label_down, color = color.new(color.gray, 30), textcolor = color.white, size = size.small)
 
 // ── Bias Table ──────────────────────────────────────────────
 f_biasColor(ref) =>
