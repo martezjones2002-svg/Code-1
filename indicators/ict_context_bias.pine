@@ -899,6 +899,7 @@ if usePLPHC
                 line.delete(plLine)
                 label.delete(plLbl)
                 plLine := na
+                plLbl  := na
 
     // ── Protection Range Rule: PH protected up to the last internal low after it ──
     if phProtected
@@ -912,6 +913,7 @@ if usePLPHC
                 line.delete(phLine)
                 label.delete(phLbl)
                 phLine := na
+                phLbl  := na
 
 // ── Bias Table ──────────────────────────────────────────────
 f_biasColor(ref) =>
