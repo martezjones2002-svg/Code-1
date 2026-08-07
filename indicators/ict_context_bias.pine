@@ -935,12 +935,20 @@ if usePLPHC
 // level on that side has already been swept, i.e. there's no higher-timeframe
 // draw left in that direction.
 //
-// Interpreted from the checklist you sent (no formal liquidity-map diagram
-// text was available this pass) - flag if this doesn't match what the
-// diagram actually showed.
+// RS distance-realism: "if RS is around 400 ticks away it's realistic, but
+// if it's 1,800 ticks away it's not going to be hit in the AM session" -
+// measured from the 9:30 Open (NYAM Opening Price) per the notes' own example.
+//
+// Low Resistance Liquidity (LRL): "price gradually trades in a direction
+// while forming multiple highs or lows along the way" instead of one
+// aggressive displacement candle - implemented as 3 consecutive confirmed
+// swing lows each higher than the last (grinding up) or 3 consecutive swing
+// highs each lower than the last (grinding down).
 
 gLiq         = "Liquidity Map"
-showLiqTable = input.bool(true, "Show Liquidity Above/Below Table", group = gLiq)
+showLiqTable = input.bool(true, "Show Liquidity Table", group = gLiq)
+rsMaxRealisticTicks = input.int(1000, "Max realistic RS distance from 9:30 Open (ticks)", minval = 1, group = gLiq)
+lrlPivotLen  = input.int(3, "LRL swing pivot length (bars each side)", minval = 1, group = gLiq)
 
 f_sweptTracker(level, isHigh) =>
     var float lastLevel = na
@@ -1003,13 +1011,49 @@ for i = 0 to array.size(liqLevels) - 1
         if lvl < close
             noPendingBelow := false
 
-var table liqTable = table.new(position.top_right, 2, 2, bgcolor = color.new(color.black, 20), border_width = 1, border_color = color.gray)
+// ── RS distance-realism ──────────────────────────────────────────────
+rsDistanceTicks = (not na(rsPrice) and not na(open0930)) ? math.abs(rsPrice - open0930) / tick : na
+rsRealistic     = not na(rsDistanceTicks) and rsDistanceTicks <= rsMaxRealisticTicks
+
+// ── Low Resistance Liquidity (LRL) ──────────────────────────────────────────────
+lrlSwPH = ta.pivothigh(high, lrlPivotLen, lrlPivotLen)
+lrlSwPL = ta.pivotlow(low, lrlPivotLen, lrlPivotLen)
+
+var float lrlLow1  = na
+var float lrlLow2  = na
+var float lrlLow3  = na
+var float lrlHigh1 = na
+var float lrlHigh2 = na
+var float lrlHigh3 = na
+
+if not na(lrlSwPL)
+    lrlLow1 := lrlLow2
+    lrlLow2 := lrlLow3
+    lrlLow3 := lrlSwPL
+
+if not na(lrlSwPH)
+    lrlHigh1 := lrlHigh2
+    lrlHigh2 := lrlHigh3
+    lrlHigh3 := lrlSwPH
+
+lrlBull = not na(lrlLow1) and not na(lrlLow2) and not na(lrlLow3) and lrlLow1 < lrlLow2 and lrlLow2 < lrlLow3
+lrlBear = not na(lrlHigh1) and not na(lrlHigh2) and not na(lrlHigh3) and lrlHigh1 > lrlHigh2 and lrlHigh2 > lrlHigh3
+
+if not na(lrlSwPL) and lrlBull
+    label.new(bar_index - lrlPivotLen, lrlLow3, "LRL", style = label.style_label_up, color = color.new(color.aqua, 100), textcolor = color.aqua, size = size.tiny)
+
+if not na(lrlSwPH) and lrlBear
+    label.new(bar_index - lrlPivotLen, lrlHigh3, "LRL", style = label.style_label_down, color = color.new(color.aqua, 100), textcolor = color.aqua, size = size.tiny)
+
+var table liqTable = table.new(position.top_right, 2, 3, bgcolor = color.new(color.black, 20), border_width = 1, border_color = color.gray)
 
 if showLiqTable and barstate.islast
     table.cell(liqTable, 0, 0, "Liquidity Above", text_color = color.white, bgcolor = color.new(color.gray, 40))
     table.cell(liqTable, 1, 0, noPendingAbove ? "None Pending" : "Pending", text_color = color.white, bgcolor = noPendingAbove ? color.new(color.red, 40) : color.new(color.green, 40))
     table.cell(liqTable, 0, 1, "Liquidity Below", text_color = color.white, bgcolor = color.new(color.gray, 40))
     table.cell(liqTable, 1, 1, noPendingBelow ? "None Pending" : "Pending", text_color = color.white, bgcolor = noPendingBelow ? color.new(color.red, 40) : color.new(color.green, 40))
+    table.cell(liqTable, 0, 2, "RS Distance", text_color = color.white, bgcolor = color.new(color.gray, 40))
+    table.cell(liqTable, 1, 2, na(rsDistanceTicks) ? "-" : (rsRealistic ? "Realistic (" + str.tostring(math.round(rsDistanceTicks)) + "t)" : "Too Far (" + str.tostring(math.round(rsDistanceTicks)) + "t)"), text_color = color.white, bgcolor = na(rsDistanceTicks) ? color.new(color.gray, 60) : (rsRealistic ? color.new(color.green, 40) : color.new(color.red, 40)))
 
 // ── Bias Table ──────────────────────────────────────────────
 f_biasColor(ref) =>
