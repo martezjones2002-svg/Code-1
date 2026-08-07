@@ -16,6 +16,14 @@ indicator("ICT Context & Bias", "ICT Bias", overlay = true, max_lines_count = 50
 tz   = "America/New_York"
 tick = syminfo.mintick
 
+// Hoisted ahead of Stage 3 (PLC/PHC + PL/PH, declared further down) so the
+// Rejection Block section - which runs earlier in the script - can read
+// these price levels for the "RB rejecting a PLC/PHC/PL/PH" trigger.
+var float plcPrice = na
+var float plPrice  = na
+var float phcPrice = na
+var float phPrice  = na
+
 // Breaker Block POI (Stage 2c) walks a dynamic-length historical range to
 // weigh wick vs. body across a swing leg - extend the lookback Pine keeps
 // for these series so that walk doesn't get silently truncated.
@@ -343,8 +351,11 @@ if useOB and bearOBevent and na(bearOBBox)
 // ══════════════════════════════════════════════════════════════════
 // STAGE 2b: PD ARRAYS — Rejection Blocks & Inverse Rejection Blocks
 // ══════════════════════════════════════════════════════════════════
-// RB forms from a wick that rejects a swept high/low. Fib anchored to the
-// candle's own high(1)/low(0), CE(0.5) = midpoint:
+// RB forms from a wick that rejects a swept high/low, OR from a wick that
+// rejects a PLC/PHC/PL/PH (Group Class #5) - lower probability from a
+// PLC/PHC, higher probability from a PL/PH; RBs formed this way get a small
+// "RB-PLC"/"RB-PL" (or PHC/PH) tag so the origin is visible on the chart.
+// Fib anchored to the candle's own high(1)/low(0), CE(0.5) = midpoint:
 //   Bullish RB (rejects lower prices): use top(1) and CE(0.5), never bottom(0).
 //   Bearish RB (rejects higher prices): use bottom(0) and CE(0.5), never top(1).
 // iRB forms when an RB's full range gets closed through (not just touched) -
@@ -356,8 +367,9 @@ if useOB and bearOBevent and na(bearOBBox)
 // bullish, 0.25 for bearish), focus moves to CE; if it didn't even reach
 // that quadrant, focus moves to the quadrant itself instead of CE.
 //
-// Not yet implemented (follow-up pass): RB forming from a PLC/PHC rejection
-// (only the liquidity-sweep trigger is covered here).
+// Not yet implemented (follow-up pass): RB rejecting another RB (the rare
+// case, only valid once price has already traded through the original RB's
+// CE).
 
 gRB            = "Rejection Blocks"
 useRB          = input.bool(true, "Show Rejection Blocks / iRB", group = gRB)
@@ -380,8 +392,17 @@ rbPriorLow  = ta.lowest(low, rbSweepLookback)[1]
 rbSweptHigh = not na(rbPriorHigh) and high >= rbPriorHigh + rbSweepTicks * tick
 rbSweptLow  = not na(rbPriorLow) and low <= rbPriorLow - rbSweepTicks * tick
 
-bullRBevent = useRB and rbBarRange > 0 and (rbLowerWick / rbBarRange) >= rbWickRatio and rbSweptLow
-bearRBevent = useRB and rbBarRange > 0 and (rbUpperWick / rbBarRange) >= rbWickRatio and rbSweptHigh
+// RB can also form from rejecting a PLC/PHC or PL/PH (Group Class #5) - lower
+// probability from a PLC/PHC, higher probability from a PL/PH, per the notes.
+// These read last bar's PLC/PHC/PL/PH state since Stage 3 runs later in the
+// script this same bar.
+bullRBTouchPL  = not na(plPrice)  and low <= plPrice  and high >= plPrice
+bullRBTouchPLC = not na(plcPrice) and low <= plcPrice and high >= plcPrice
+bearRBTouchPH  = not na(phPrice)  and high >= phPrice  and low <= phPrice
+bearRBTouchPHC = not na(phcPrice) and high >= phcPrice and low <= phcPrice
+
+bullRBevent = useRB and rbBarRange > 0 and (rbLowerWick / rbBarRange) >= rbWickRatio and (rbSweptLow or bullRBTouchPL or bullRBTouchPLC)
+bearRBevent = useRB and rbBarRange > 0 and (rbUpperWick / rbBarRange) >= rbWickRatio and (rbSweptHigh or bearRBTouchPH or bearRBTouchPHC)
 
 var box   bullRBBox      = na
 var float bullRBTop      = na
@@ -488,6 +509,11 @@ if bullRBevent and na(bullRBBox)
     bullRBBox      := box.new(bar_index - rbWidthBars + 1, bullRBTop, bar_index + 1, bullRBBot, border_color = color.teal, bgcolor = bullRBColor, extend = extend.none)
     bullRBPOIln    := line.new(bar_index - rbWidthBars + 1, ce3, bar_index + 1, ce3, color = color.teal, width = 1, style = line.style_dashed)
     bullRBFormedBar := bar_index
+    if not rbSweptLow
+        // formed from a PLC/PHC or PL/PH rejection instead of a liquidity sweep -
+        // tagged so the new pathway is visually distinguishable from the
+        // already-verified sweep-based RBs during testing
+        label.new(bar_index, low, bullRBTouchPL ? "RB-PL" : "RB-PLC", style = label.style_label_up, color = color.new(color.teal, 100), textcolor = color.teal, size = size.tiny)
 
 if bearRBevent and na(bearRBBox)
     bearRBTop      := high
@@ -496,6 +522,8 @@ if bearRBevent and na(bearRBBox)
     bearRBBox      := box.new(bar_index - rbWidthBars + 1, bearRBTop, bar_index + 1, bearRBBot, border_color = color.red, bgcolor = bearRBColor, extend = extend.none)
     bearRBPOIln    := line.new(bar_index - rbWidthBars + 1, ce4, bar_index + 1, ce4, color = color.red, width = 1, style = line.style_dashed)
     bearRBFormedBar := bar_index
+    if not rbSweptHigh
+        label.new(bar_index, high, bearRBTouchPH ? "RB-PH" : "RB-PHC", style = label.style_label_down, color = color.new(color.red, 100), textcolor = color.red, size = size.tiny)
 
 // ── Failure Swing + RB reclassification ──────────────────────────────────────────────
 // Checked exactly once, on the bar immediately after the RB forms.
@@ -794,26 +822,25 @@ phColor        = input.color(color.new(color.orange, 0), "PH color", group = gPL
 swPH = ta.pivothigh(high, plphPivotLen, plphPivotLen)
 swPL = ta.pivotlow(low, plphPivotLen, plphPivotLen)
 
-var float plcPrice = na
+// plcPrice/plPrice/phcPrice/phPrice are declared near the top of the script
+// (hoisted for the Rejection Block section) - only their companion state
+// lives here.
 var int   plcBar   = na
 var bool  plcActive = false
 var line  plcLine  = na
 var label plcLbl   = na
 
-var float plPrice      = na
 var int   plBar        = na
 var bool  plProtected  = false
 var float plInternalHigh = na
 var line  plLine = na
 var label plLbl  = na
 
-var float phcPrice = na
 var int   phcBar   = na
 var bool  phcActive = false
 var line  phcLine  = na
 var label phcLbl   = na
 
-var float phPrice      = na
 var int   phBar        = na
 var bool  phProtected  = false
 var float phInternalLow = na
