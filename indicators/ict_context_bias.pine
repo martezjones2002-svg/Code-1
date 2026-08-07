@@ -920,6 +920,97 @@ if usePLPHC
                 phLine := na
                 phLbl  := na
 
+// ============================================================================
+// STAGE 4: Liquidity Pool Mapping
+// ============================================================================
+// External liquidity = the higher-timeframe pools traders sweep on the way to
+// a target: PDH/PDL, PWH/PWL, and the 4 session highs/lows (already drawn
+// above). Internal liquidity = PLC/PHC/PL/PH (Stage 3), the nearer-term
+// levels inside the current range - already visible on the chart, not
+// re-tracked here.
+//
+// Each external level is tracked as "swept" once price trades through it -
+// that status resets whenever the level itself updates (new day/week/
+// session). "No pending liquidity above/below" means every tracked external
+// level on that side has already been swept, i.e. there's no higher-timeframe
+// draw left in that direction.
+//
+// Interpreted from the checklist you sent (no formal liquidity-map diagram
+// text was available this pass) - flag if this doesn't match what the
+// diagram actually showed.
+
+gLiq         = "Liquidity Map"
+showLiqTable = input.bool(true, "Show Liquidity Above/Below Table", group = gLiq)
+
+f_sweptTracker(level, isHigh) =>
+    var float lastLevel = na
+    var bool  swept     = false
+    if not na(level) and level != lastLevel
+        lastLevel := level
+        swept     := false
+    if not swept and not na(level)
+        swept := isHigh ? high >= level : low <= level
+    swept
+
+pdhSwept     = f_sweptTracker(pdh, true)
+pdlSwept     = f_sweptTracker(pdl, false)
+pwhSwept     = f_sweptTracker(pwh, true)
+pwlSwept     = f_sweptTracker(pwl, false)
+asiaHSwept   = f_sweptTracker(asiaH, true)
+asiaLSwept   = f_sweptTracker(asiaL, false)
+londonHSwept = f_sweptTracker(londonH, true)
+londonLSwept = f_sweptTracker(londonL, false)
+nyamHSwept   = f_sweptTracker(nyamH, true)
+nyamLSwept   = f_sweptTracker(nyamL, false)
+nypmHSwept   = f_sweptTracker(nypmH, true)
+nypmLSwept   = f_sweptTracker(nypmL, false)
+
+liqLevels = array.new<float>()
+liqSwept  = array.new<bool>()
+array.push(liqLevels, pdh)
+array.push(liqSwept, pdhSwept)
+array.push(liqLevels, pdl)
+array.push(liqSwept, pdlSwept)
+array.push(liqLevels, pwh)
+array.push(liqSwept, pwhSwept)
+array.push(liqLevels, pwl)
+array.push(liqSwept, pwlSwept)
+array.push(liqLevels, asiaH)
+array.push(liqSwept, asiaHSwept)
+array.push(liqLevels, asiaL)
+array.push(liqSwept, asiaLSwept)
+array.push(liqLevels, londonH)
+array.push(liqSwept, londonHSwept)
+array.push(liqLevels, londonL)
+array.push(liqSwept, londonLSwept)
+array.push(liqLevels, nyamH)
+array.push(liqSwept, nyamHSwept)
+array.push(liqLevels, nyamL)
+array.push(liqSwept, nyamLSwept)
+array.push(liqLevels, nypmH)
+array.push(liqSwept, nypmHSwept)
+array.push(liqLevels, nypmL)
+array.push(liqSwept, nypmLSwept)
+
+noPendingAbove = true
+noPendingBelow = true
+for i = 0 to array.size(liqLevels) - 1
+    lvl = array.get(liqLevels, i)
+    swp = array.get(liqSwept, i)
+    if not na(lvl) and not swp
+        if lvl > close
+            noPendingAbove := false
+        if lvl < close
+            noPendingBelow := false
+
+var table liqTable = table.new(position.top_right, 2, 2, bgcolor = color.new(color.black, 20), border_width = 1, border_color = color.gray)
+
+if showLiqTable and barstate.islast
+    table.cell(liqTable, 0, 0, "Liquidity Above", text_color = color.white, bgcolor = color.new(color.gray, 40))
+    table.cell(liqTable, 1, 0, noPendingAbove ? "None Pending" : "Pending", text_color = color.white, bgcolor = noPendingAbove ? color.new(color.red, 40) : color.new(color.green, 40))
+    table.cell(liqTable, 0, 1, "Liquidity Below", text_color = color.white, bgcolor = color.new(color.gray, 40))
+    table.cell(liqTable, 1, 1, noPendingBelow ? "None Pending" : "Pending", text_color = color.white, bgcolor = noPendingBelow ? color.new(color.red, 40) : color.new(color.green, 40))
+
 // ── Bias Table ──────────────────────────────────────────────
 f_biasColor(ref) =>
     na(ref) ? color.gray : close > ref ? color.green : color.red
