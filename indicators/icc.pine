@@ -1,0 +1,162 @@
+//@version=6
+indicator("ICC Setup Marker", "ICC", overlay = true, max_labels_count = 300, max_lines_count = 300)
+
+// ── Swing Structure ──────────────────────────────────────────────
+g1         = "Swing Structure"
+pivotLen   = input.int(5, "Fractal Length (left/right bars)", minval = 2, group = g1)
+showLevels = input.bool(true, "Show Broken Level Lines", group = g1)
+
+// ── ICC Setup Logic ────────────────────────────────────────────────
+g2          = "ICC Setup Logic"
+invalidMult = input.float(0.15, "Invalidation Buffer (x ATR)", minval = 0, step = 0.05, group = g2)
+
+// ── Display ──────────────────────────────────────────────────────
+g3         = "Display"
+showLabels = input.bool(true, "Show I / C / C Labels", group = g3)
+showLegs   = input.bool(true, "Show Connecting Lines", group = g3)
+bullColor  = input.color(color.teal, "Bullish Level Color", group = g3)
+bearColor  = input.color(color.red, "Bearish Level Color", group = g3)
+indicColor = input.color(color.orange, "Indication Color", group = g3)
+corrColor  = input.color(#3179f5, "Correction Color", group = g3)
+contBull   = input.color(color.lime, "Continuation Color (Bull Entry)", group = g3)
+contBear   = input.color(color.fuchsia, "Continuation Color (Bear Entry)", group = g3)
+
+atrVal   = ta.atr(14)
+invalBuf = atrVal * invalidMult
+
+ph = ta.pivothigh(pivotLen, pivotLen)
+pl = ta.pivotlow(pivotLen, pivotLen)
+
+// ── Swing Structure Tracking (the HH/HL/LH/LL points) ────────────────
+var float lastSwingHigh    = na
+var float prevSwingHigh    = na
+var int   lastSwingHighBar = na
+var float lastSwingLow     = na
+var float prevSwingLow     = na
+var int   lastSwingLowBar  = na
+var line  lastHighLine     = na
+var line  lastLowLine      = na
+
+if not na(ph)
+    prevSwingHigh    := lastSwingHigh
+    lastSwingHigh    := ph
+    lastSwingHighBar := bar_index - pivotLen
+    if showLevels
+        if not na(lastHighLine)
+            line.delete(lastHighLine)
+        lastHighLine := line.new(lastSwingHighBar, ph, bar_index, ph, color = color.new(bearColor, 40), style = line.style_dashed, extend = extend.right)
+
+if not na(pl)
+    prevSwingLow    := lastSwingLow
+    lastSwingLow    := pl
+    lastSwingLowBar := bar_index - pivotLen
+    if showLevels
+        if not na(lastLowLine)
+            line.delete(lastLowLine)
+        lastLowLine := line.new(lastSwingLowBar, pl, bar_index, pl, color = color.new(bullColor, 40), style = line.style_dashed, extend = extend.right)
+
+// per-bar event flags, used for alertcondition()
+bullIndicFired = false
+bullCorrFired  = false
+bullContFired  = false
+bearIndicFired = false
+bearCorrFired  = false
+bearContFired  = false
+
+// ── Bullish ICC State Machine ─────────────────────────────────────
+// 0 = waiting for a close above the last swing high  -> Indication (break of structure)
+// 1 = broke out, waiting for the next swing low       -> Correction (pullback to a HL)
+// 2 = armed, waiting for close to rebreak the level    -> Continuation (entry)
+var int   bullState    = 0
+var float levelPriceB  = na
+var int   indicBarB    = na
+var float usedSwingHiB = na
+var float corrLowB     = na
+var int   corrLowBarB  = na
+
+if bullState == 0
+    if not na(lastSwingHigh) and lastSwingHigh != usedSwingHiB and close > lastSwingHigh
+        bullState    := 1
+        levelPriceB  := lastSwingHigh
+        indicBarB    := bar_index
+        usedSwingHiB := lastSwingHigh
+        if showLabels
+            label.new(bar_index, close, "I", style = label.style_label_down, color = color.new(indicColor, 0), textcolor = color.white, size = size.small, tooltip = "Indication - break of structure")
+        bullIndicFired := true
+else if bullState == 1
+    if close < levelPriceB - invalBuf
+        bullState := 0
+    else if not na(pl) and (bar_index - pivotLen) > indicBarB
+        pivBar = bar_index - pivotLen
+        if not na(prevSwingLow) and pl < prevSwingLow - invalBuf
+            bullState := 0
+        else
+            corrLowB    := pl
+            corrLowBarB := pivBar
+            bullState   := 2
+            if showLabels
+                label.new(pivBar, pl, "C", style = label.style_label_up, color = color.new(corrColor, 0), textcolor = color.white, size = size.small, tooltip = "Correction - pullback to HL")
+            if showLegs
+                line.new(indicBarB, levelPriceB, pivBar, pl, color = color.new(color.gray, 40), style = line.style_dotted)
+            bullCorrFired := true
+else if bullState == 2
+    if close < corrLowB - invalBuf
+        bullState := 0
+    else if close > levelPriceB
+        if showLabels
+            label.new(bar_index, close, "C", style = label.style_label_down, color = color.new(contBull, 0), textcolor = color.black, size = size.small, tooltip = "Continuation - level rebroken, potential long entry")
+        if showLegs
+            line.new(corrLowBarB, corrLowB, bar_index, close, color = color.new(contBull, 20), width = 2)
+        bullContFired := true
+        bullState := 0
+
+// ── Bearish ICC State Machine ────────────────────────────────────
+var int   bearState    = 0
+var float levelPriceS  = na
+var int   indicBarS    = na
+var float usedSwingLoS = na
+var float corrHighS    = na
+var int   corrHighBarS = na
+
+if bearState == 0
+    if not na(lastSwingLow) and lastSwingLow != usedSwingLoS and close < lastSwingLow
+        bearState    := 1
+        levelPriceS  := lastSwingLow
+        indicBarS    := bar_index
+        usedSwingLoS := lastSwingLow
+        if showLabels
+            label.new(bar_index, close, "I", style = label.style_label_up, color = color.new(indicColor, 0), textcolor = color.white, size = size.small, tooltip = "Indication - break of structure")
+        bearIndicFired := true
+else if bearState == 1
+    if close > levelPriceS + invalBuf
+        bearState := 0
+    else if not na(ph) and (bar_index - pivotLen) > indicBarS
+        pivBar = bar_index - pivotLen
+        if not na(prevSwingHigh) and ph > prevSwingHigh + invalBuf
+            bearState := 0
+        else
+            corrHighS    := ph
+            corrHighBarS := pivBar
+            bearState    := 2
+            if showLabels
+                label.new(pivBar, ph, "C", style = label.style_label_down, color = color.new(corrColor, 0), textcolor = color.white, size = size.small, tooltip = "Correction - pullback to LH")
+            if showLegs
+                line.new(indicBarS, levelPriceS, pivBar, ph, color = color.new(color.gray, 40), style = line.style_dotted)
+            bearCorrFired := true
+else if bearState == 2
+    if close > corrHighS + invalBuf
+        bearState := 0
+    else if close < levelPriceS
+        if showLabels
+            label.new(bar_index, close, "C", style = label.style_label_up, color = color.new(contBear, 0), textcolor = color.white, size = size.small, tooltip = "Continuation - level rebroken, potential short entry")
+        if showLegs
+            line.new(corrHighBarS, corrHighS, bar_index, close, color = color.new(contBear, 20), width = 2)
+        bearContFired := true
+        bearState := 0
+
+alertcondition(bullIndicFired, title = "Bullish Indication", message = "ICC Bullish: Indication (break of structure) confirmed")
+alertcondition(bullCorrFired, title = "Bullish Correction", message = "ICC Bullish: Correction (pullback to HL) confirmed")
+alertcondition(bullContFired, title = "Bullish Continuation (Entry)", message = "ICC Bullish: Continuation - level rebroken, potential long entry")
+alertcondition(bearIndicFired, title = "Bearish Indication", message = "ICC Bearish: Indication (break of structure) confirmed")
+alertcondition(bearCorrFired, title = "Bearish Correction", message = "ICC Bearish: Correction (pullback to LH) confirmed")
+alertcondition(bearContFired, title = "Bearish Continuation (Entry)", message = "ICC Bearish: Continuation - level rebroken, potential short entry")
