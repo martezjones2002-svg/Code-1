@@ -751,8 +751,15 @@ if bullFVGnew
     if showFVG
         bullFVGBoxViz := box.new(bar_index - 2, bullFVGTop, bar_index, bullFVGBot, border_color = color.new(color.blue, 40), bgcolor = color.new(color.blue, 90), extend = extend.right)
 
+// IFVG: "forms when a FVG receives a candle close through it on the same
+// timeframe it was created on" - the invalidation IS the IFVG event, just
+// surfaced as its own flag so Stage 5c can watch for it as confirmation.
+ifvgBull = false
+ifvgBear = false
+
 if not na(bullFVGBar) and close < bullFVGBot
     bullFVGBar := na
+    ifvgBear := true
     if not na(bullFVGBoxViz)
         box.delete(bullFVGBoxViz)
         bullFVGBoxViz := na
@@ -769,6 +776,7 @@ if bearFVGnew
 
 if not na(bearFVGBar) and close > bearFVGTop
     bearFVGBar := na
+    ifvgBull := true
     if not na(bearFVGBoxViz)
         box.delete(bearFVGBoxViz)
         bearFVGBoxViz := na
@@ -1291,6 +1299,106 @@ if bearQualifies and not touchingBearNow[1]
         label.new(bar_index, high, "LIMIT\nSHORT", style = label.style_label_down, color = color.new(color.red, 20), textcolor = color.white, size = size.normal)
     else
         label.new(bar_index, high, "WAIT\n(short)", style = label.style_label_down, color = color.new(color.gray, 30), textcolor = color.white, size = size.small)
+
+// ============================================================================
+// STAGE 5c: Confirmation -> Retracement -> Entry
+// ============================================================================
+// For a WAIT signal: "wait for confirmation (IFVG or CoS), then wait for a
+// retracement into the discount (longs) / premium (shorts) of the newly
+// created range, then enter at the first PD-array within that area."
+//
+// Sequence once WAIT fires:
+//   1. Armed - watching for CoS or IFVG in the WAIT's direction.
+//   2. Confirmed - CoS/IFVG fired; the "new range" is [WAIT origin, the
+//      extreme reached at confirmation]; CE splits it into discount/premium.
+//   3. Entry - price retraces into the discount/premium half AND touches a
+//      PD-array (OB/RB/iRB/Breaker/PLC/PL) there.
+// Expires (resets, no entry) if it drags past maxConfirmBars without
+// confirming, or past maxEntryBars waiting for the retracement, or if price
+// closes back through the WAIT origin (setup invalidated).
+
+gConfirm       = "Confirmation Entry (Stage 5c)"
+maxConfirmBars = input.int(40, "Max bars to wait for CoS/IFVG confirmation", minval = 1, group = gConfirm)
+maxEntryBars   = input.int(40, "Max bars to wait for retracement after confirmation", minval = 1, group = gConfirm)
+
+var bool  waitArmedBull    = false
+var float waitOriginBull   = na
+var int   waitBarBull      = na
+var bool  confirmedBull    = false
+var float confirmedExtBull = na
+var float rangeCEBull      = na
+var int   confirmedBarBull = na
+
+var bool  waitArmedBear    = false
+var float waitOriginBear   = na
+var int   waitBarBear      = na
+var bool  confirmedBear    = false
+var float confirmedExtBear = na
+var float rangeCEBear      = na
+var int   confirmedBarBear = na
+
+// arm on a fresh WAIT (not a LIMIT, that's already an immediate signal)
+if bullQualifies and not touchingBullNow[1] and not bullLimitReady
+    waitArmedBull  := true
+    waitOriginBull := low
+    waitBarBull    := bar_index
+    confirmedBull  := false
+
+if bearQualifies and not touchingBearNow[1] and not bearLimitReady
+    waitArmedBear  := true
+    waitOriginBear := high
+    waitBarBear    := bar_index
+    confirmedBear  := false
+
+// stage 1 -> 2: confirmation (CoS or IFVG)
+if waitArmedBull and not confirmedBull
+    if close < waitOriginBull
+        waitArmedBull := false
+    else if cosBull or ifvgBull
+        confirmedBull    := true
+        confirmedExtBull := high
+        rangeCEBull       := (waitOriginBull + high) / 2
+        confirmedBarBull  := bar_index
+        label.new(bar_index, high, "Confirmed", style = label.style_label_down, color = color.new(color.lime, 100), textcolor = color.lime, size = size.tiny)
+    else if bar_index - waitBarBull > maxConfirmBars
+        waitArmedBull := false
+
+if waitArmedBear and not confirmedBear
+    if close > waitOriginBear
+        waitArmedBear := false
+    else if cosBear or ifvgBear
+        confirmedBear    := true
+        confirmedExtBear := low
+        rangeCEBear       := (waitOriginBear + low) / 2
+        confirmedBarBear  := bar_index
+        label.new(bar_index, low, "Confirmed", style = label.style_label_up, color = color.new(color.red, 100), textcolor = color.red, size = size.tiny)
+    else if bar_index - waitBarBear > maxConfirmBars
+        waitArmedBear := false
+
+// stage 2 -> 3: retracement into discount/premium + PD-array touch = entry
+if confirmedBull
+    if close < waitOriginBull
+        confirmedBull := false
+        waitArmedBull := false
+    else if low <= rangeCEBull and f_touchingBull(low, high)
+        label.new(bar_index, low, "ENTRY\nLONG", style = label.style_label_up, color = color.new(color.green, 10), textcolor = color.white, size = size.normal)
+        confirmedBull := false
+        waitArmedBull := false
+    else if bar_index - confirmedBarBull > maxEntryBars
+        confirmedBull := false
+        waitArmedBull := false
+
+if confirmedBear
+    if close > waitOriginBear
+        confirmedBear := false
+        waitArmedBear := false
+    else if high >= rangeCEBear and f_touchingBear(low, high)
+        label.new(bar_index, high, "ENTRY\nSHORT", style = label.style_label_down, color = color.new(color.red, 10), textcolor = color.white, size = size.normal)
+        confirmedBear := false
+        waitArmedBear := false
+    else if bar_index - confirmedBarBear > maxEntryBars
+        confirmedBear := false
+        waitArmedBear := false
 
 // ── Bias Table ──────────────────────────────────────────────
 f_biasColor(ref) =>
