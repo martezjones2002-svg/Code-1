@@ -389,6 +389,7 @@ type RBZone
 gRB            = "Rejection Blocks"
 useRB          = input.bool(true, "Show Rejection Blocks / iRB", group = gRB)
 useFSRB        = input.bool(true, "Reclassify as Failure Swing RB when applicable", group = gRB)
+showRBTags     = input.bool(false, "Show RB-PLC/RB-PL/RB-PHC/RB-PH/FS tags", group = gRB)
 rbWickRatio    = input.float(50, "Min wick (% of candle range)", minval = 0, maxval = 100, group = gRB) / 100
 rbSweepLookback = input.int(20, "Sweep reference lookback (bars)", minval = 5, group = gRB)
 rbSweepTicks   = input.int(1, "Min sweep beyond prior extreme (ticks)", minval = 0, group = gRB)
@@ -487,7 +488,7 @@ if array.size(bearRBZones) > 0
 // ── New RB formation ──────────────────────────────────────────────
 if bullRBevent and array.size(bullRBZones) < rbMaxZones
     array.push(bullRBZones, f_rbNew(bar_index - rbWidthBars + 1, high, low, color.teal))
-    if not rbSweptLow
+    if not rbSweptLow and showRBTags
         // formed from a PLC/PHC or PL/PH rejection instead of a liquidity sweep -
         // tagged so the new pathway is visually distinguishable from the
         // already-verified sweep-based RBs during testing
@@ -495,7 +496,7 @@ if bullRBevent and array.size(bullRBZones) < rbMaxZones
 
 if bearRBevent and array.size(bearRBZones) < rbMaxZones
     array.push(bearRBZones, f_rbNew(bar_index - rbWidthBars + 1, high, low, color.red))
-    if not rbSweptHigh
+    if not rbSweptHigh and showRBTags
         label.new(bar_index, high, bearRBTouchPH ? "RB-PH" : "RB-PHC", style = label.style_label_down, color = color.new(color.red, 100), textcolor = color.red, size = size.tiny)
 
 // ── Failure Swing + RB reclassification ──────────────────────────────────────────────
@@ -511,7 +512,8 @@ if useFSRB and array.size(bullRBZones) > 0
             newPOI = low <= q75Check ? ceCheck : q75Check
             line.set_y1(lastBull.poiLn, newPOI)
             line.set_y2(lastBull.poiLn, newPOI)
-            label.new(bar_index, newPOI, "FS", style = label.style_label_up, color = color.new(color.teal, 100), textcolor = color.teal, size = size.tiny)
+            if showRBTags
+                label.new(bar_index, newPOI, "FS", style = label.style_label_up, color = color.new(color.teal, 100), textcolor = color.teal, size = size.tiny)
 
 if useFSRB and array.size(bearRBZones) > 0
     lastBear = array.get(bearRBZones, array.size(bearRBZones) - 1)
@@ -523,7 +525,8 @@ if useFSRB and array.size(bearRBZones) > 0
             newPOI2 = high >= q25Check ? ceCheck2 : q25Check
             line.set_y1(lastBear.poiLn, newPOI2)
             line.set_y2(lastBear.poiLn, newPOI2)
-            label.new(bar_index, newPOI2, "FS", style = label.style_label_down, color = color.new(color.red, 100), textcolor = color.red, size = size.tiny)
+            if showRBTags
+                label.new(bar_index, newPOI2, "FS", style = label.style_label_down, color = color.new(color.red, 100), textcolor = color.red, size = size.tiny)
 
 // ============================================================================
 // STAGE 2c: Breaker Blocks (corrected against @invisibility's Group Class #5)
@@ -957,6 +960,7 @@ if usePLPHC
 
 gLiq         = "Liquidity Map"
 showLiqTable = input.bool(true, "Show Liquidity Table", group = gLiq)
+showLRL      = input.bool(false, "Show LRL tags", group = gLiq)
 rsMaxRealisticTicks = input.int(1000, "Max realistic RS distance from 9:30 Open (ticks)", minval = 1, group = gLiq)
 lrlPivotLen  = input.int(3, "LRL swing pivot length (bars each side)", minval = 1, group = gLiq)
 
@@ -1064,11 +1068,13 @@ var int lastLRLBullBar = na
 var int lastLRLBearBar = na
 
 if not na(lrlSwPL) and lrlBull
-    label.new(bar_index - lrlPivotLen, lrlLow3, "LRL", style = label.style_label_up, color = color.new(color.aqua, 100), textcolor = color.aqua, size = size.tiny)
+    if showLRL
+        label.new(bar_index - lrlPivotLen, lrlLow3, "LRL", style = label.style_label_up, color = color.new(color.aqua, 100), textcolor = color.aqua, size = size.tiny)
     lastLRLBullBar := bar_index
 
 if not na(lrlSwPH) and lrlBear
-    label.new(bar_index - lrlPivotLen, lrlHigh3, "LRL", style = label.style_label_down, color = color.new(color.aqua, 100), textcolor = color.aqua, size = size.tiny)
+    if showLRL
+        label.new(bar_index - lrlPivotLen, lrlHigh3, "LRL", style = label.style_label_down, color = color.new(color.aqua, 100), textcolor = color.aqua, size = size.tiny)
     lastLRLBearBar := bar_index
 
 var table liqTable = table.new(position.top_right, 2, 3, bgcolor = color.new(color.black, 20), border_width = 1, border_color = color.gray)
@@ -1099,26 +1105,28 @@ if showLiqTable and barstate.islast
 // them into the full 5-step entry sequence with what's already built).
 
 gCOS          = "Change of Structure & Turtle Soup"
-useCOS        = input.bool(true, "Show Change of Structure (CoS)", group = gCOS)
+showCOS       = input.bool(false, "Show Change of Structure (CoS) tags", group = gCOS)
 cosPivotLen   = input.int(5, "CoS swing pivot length (bars each side)", minval = 1, group = gCOS)
-useTS         = input.bool(true, "Show Turtle Soup", group = gCOS)
+showTS        = input.bool(false, "Show Turtle Soup tags", group = gCOS)
 tsPivotLen    = input.int(2, "Turtle Soup short-term pivot length (bars each side)", minval = 1, group = gCOS)
 tsSweepTicks  = input.int(1, "Min poke beyond short-term high/low (ticks)", minval = 0, group = gCOS)
 tsConfirmBars = input.int(3, "Max bars to reclaim after the poke", minval = 1, group = gCOS)
 
 // ── Change of Structure ──────────────────────────────────────────────
+// Detection always runs (Stage 5b/5c depend on cosBull/cosBear as signals) -
+// showCOS only controls whether the "CoS" tag gets drawn.
 cosSwPH = ta.pivothigh(high, cosPivotLen, cosPivotLen)
 cosSwPL = ta.pivotlow(low, cosPivotLen, cosPivotLen)
 
 var float cosLastSwingH = na
 var float cosLastSwingL = na
 
-cosBull = useCOS and not na(cosLastSwingH) and close > cosLastSwingH
-cosBear = useCOS and not na(cosLastSwingL) and close < cosLastSwingL
+cosBull = not na(cosLastSwingH) and close > cosLastSwingH
+cosBear = not na(cosLastSwingL) and close < cosLastSwingL
 
-if cosBull
+if cosBull and showCOS
     label.new(bar_index, low, "CoS", style = label.style_label_up, color = color.new(color.lime, 100), textcolor = color.lime, size = size.tiny)
-if cosBear
+if cosBear and showCOS
     label.new(bar_index, high, "CoS", style = label.style_label_down, color = color.new(color.red, 100), textcolor = color.red, size = size.tiny)
 
 // update after the break-check: consume if just broken, else track the newest pivot
@@ -1151,12 +1159,12 @@ var int   tsBearBar   = na
 // per the notes, that poke ITSELF "creates a short term high or low" - so
 // the level to watch for a reclaim through is THIS BAR's own extreme, not
 // the old pre-poke level.
-if useTS and not na(tsLastSTL) and low <= tsLastSTL - tsSweepTicks * tick and not tsBullArmed
+if not na(tsLastSTL) and low <= tsLastSTL - tsSweepTicks * tick and not tsBullArmed
     tsBullArmed := true
     tsBullSTL   := low
     tsBullBar   := bar_index
 
-if useTS and not na(tsLastSTH) and high >= tsLastSTH + tsSweepTicks * tick and not tsBearArmed
+if not na(tsLastSTH) and high >= tsLastSTH + tsSweepTicks * tick and not tsBearArmed
     tsBearArmed := true
     tsBearSTH   := high
     tsBearBar   := bar_index
@@ -1174,7 +1182,8 @@ var int lastTSBearBar = na
 
 if tsBullArmed and bar_index > tsBullBar
     if close > tsBullSTL
-        label.new(bar_index, low, "TS", style = label.style_label_up, color = color.new(color.teal, 100), textcolor = color.teal, size = size.tiny)
+        if showTS
+            label.new(bar_index, low, "TS", style = label.style_label_up, color = color.new(color.teal, 100), textcolor = color.teal, size = size.tiny)
         lastTSBullBar := bar_index
         tsBullArmed := false
     else if bar_index - tsBullBar > tsConfirmBars
@@ -1182,7 +1191,8 @@ if tsBullArmed and bar_index > tsBullBar
 
 if tsBearArmed and bar_index > tsBearBar
     if close < tsBearSTH
-        label.new(bar_index, high, "TS", style = label.style_label_down, color = color.new(color.red, 100), textcolor = color.red, size = size.tiny)
+        if showTS
+            label.new(bar_index, high, "TS", style = label.style_label_down, color = color.new(color.red, 100), textcolor = color.red, size = size.tiny)
         lastTSBearBar := bar_index
         tsBearArmed := false
     else if bar_index - tsBearBar > tsConfirmBars
@@ -1218,6 +1228,7 @@ gSignal           = "Entry Signal"
 useSignal         = input.bool(true, "Show Limit/Wait Signal", group = gSignal)
 signalRecentBars  = input.int(15, "Max bars for LRL/TS to still count as \"recent\"", minval = 1, group = gSignal)
 signalOpensNeeded = input.int(3, "Min opening prices on correct side (of 6)", minval = 0, maxval = 6, group = gSignal)
+signalCooldownBars = input.int(20, "Min bars between repeat signals (same direction)", minval = 0, group = gSignal)
 
 f_touchingBull(lo, hi) =>
     t = false
@@ -1287,14 +1298,26 @@ bearQualifies = touchingBearNow and bearLiquidityAligned and bearOpensCount >= s
 bullLimitReady = bullQualifies and bullLRLRecent and bullTSRecent
 bearLimitReady = bearQualifies and bearLRLRecent and bearTSRecent
 
-// fire once per touch, not every bar while price sits inside the zone
-if bullQualifies and not touchingBullNow[1]
+// fire once per touch, not every bar while price sits inside the zone, and
+// not again within signalCooldownBars of the last one - with several
+// overlapping POIs in a congested area, the raw "touching" flag can flip
+// false->true repeatedly in a few bars, which was re-firing a fresh signal
+// almost every time instead of treating it as one setup.
+var int lastSignalBarBull = na
+var int lastSignalBarBear = na
+
+bullSignalFire = bullQualifies and not touchingBullNow[1] and (na(lastSignalBarBull) or bar_index - lastSignalBarBull >= signalCooldownBars)
+bearSignalFire = bearQualifies and not touchingBearNow[1] and (na(lastSignalBarBear) or bar_index - lastSignalBarBear >= signalCooldownBars)
+
+if bullSignalFire
+    lastSignalBarBull := bar_index
     if bullLimitReady
         label.new(bar_index, low, "LIMIT\nLONG", style = label.style_label_up, color = color.new(color.green, 20), textcolor = color.white, size = size.normal)
     else
         label.new(bar_index, low, "WAIT\n(long)", style = label.style_label_up, color = color.new(color.gray, 30), textcolor = color.white, size = size.small)
 
-if bearQualifies and not touchingBearNow[1]
+if bearSignalFire
+    lastSignalBarBear := bar_index
     if bearLimitReady
         label.new(bar_index, high, "LIMIT\nSHORT", style = label.style_label_down, color = color.new(color.red, 20), textcolor = color.white, size = size.normal)
     else
@@ -1318,6 +1341,7 @@ if bearQualifies and not touchingBearNow[1]
 // closes back through the WAIT origin (setup invalidated).
 
 gConfirm       = "Confirmation Entry (Stage 5c)"
+showConfirmed  = input.bool(false, "Show \"Confirmed\" tag (before ENTRY fires)", group = gConfirm)
 maxConfirmBars = input.int(40, "Max bars to wait for CoS/IFVG confirmation", minval = 1, group = gConfirm)
 maxEntryBars   = input.int(40, "Max bars to wait for retracement after confirmation", minval = 1, group = gConfirm)
 
@@ -1337,14 +1361,17 @@ var float confirmedExtBear = na
 var float rangeCEBear      = na
 var int   confirmedBarBear = na
 
-// arm on a fresh WAIT (not a LIMIT, that's already an immediate signal)
-if bullQualifies and not touchingBullNow[1] and not bullLimitReady
+// arm on a fresh WAIT (not a LIMIT, that's already an immediate signal) -
+// reuses bullSignalFire/bearSignalFire (Stage 5b) so this stays in sync
+// with the cooldown-gated label firing, instead of re-deriving its own
+// (uncooled) trigger.
+if bullSignalFire and not bullLimitReady
     waitArmedBull  := true
     waitOriginBull := low
     waitBarBull    := bar_index
     confirmedBull  := false
 
-if bearQualifies and not touchingBearNow[1] and not bearLimitReady
+if bearSignalFire and not bearLimitReady
     waitArmedBear  := true
     waitOriginBear := high
     waitBarBear    := bar_index
@@ -1359,7 +1386,8 @@ if waitArmedBull and not confirmedBull
         confirmedExtBull := high
         rangeCEBull       := (waitOriginBull + high) / 2
         confirmedBarBull  := bar_index
-        label.new(bar_index, high, "Confirmed", style = label.style_label_down, color = color.new(color.lime, 100), textcolor = color.lime, size = size.tiny)
+        if showConfirmed
+            label.new(bar_index, high, "Confirmed", style = label.style_label_down, color = color.new(color.lime, 100), textcolor = color.lime, size = size.tiny)
     else if bar_index - waitBarBull > maxConfirmBars
         waitArmedBull := false
 
@@ -1371,7 +1399,8 @@ if waitArmedBear and not confirmedBear
         confirmedExtBear := low
         rangeCEBear       := (waitOriginBear + low) / 2
         confirmedBarBear  := bar_index
-        label.new(bar_index, low, "Confirmed", style = label.style_label_up, color = color.new(color.red, 100), textcolor = color.red, size = size.tiny)
+        if showConfirmed
+            label.new(bar_index, low, "Confirmed", style = label.style_label_up, color = color.new(color.red, 100), textcolor = color.red, size = size.tiny)
     else if bar_index - waitBarBear > maxConfirmBars
         waitArmedBear := false
 
