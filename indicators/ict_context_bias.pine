@@ -1,0 +1,1442 @@
+//@version=6
+indicator("ICT Context & Bias", "ICT Bias", overlay = true, max_lines_count = 500, max_labels_count = 300, max_boxes_count = 300)
+
+// Stage 1 of a multi-stage build: context/bias only. No PD arrays, no entry
+// signals yet - this just automates the manual markup (opening prices,
+// PDH/PDL/PWH/PWL, session highs/lows, RS) so bias is readable at a glance.
+//
+// Open questions / assumptions (flag if wrong):
+//   - "True Day Open" = 00:00, "Daily Open" = the 18:00 daily candle open.
+//   - Asia/London/NY AM/NY PM session clock times were never given exactly -
+//     defaults below are common ICT conventions, adjustable via inputs.
+//   - Range Settlement's exact formula isn't disclosed (computed by a
+//     separate proprietary indicator per the notes) - wired as a manual
+//     price input rather than guessed at.
+
+tz   = "America/New_York"
+tick = syminfo.mintick
+
+// Hoisted ahead of Stage 3 (PLC/PHC + PL/PH, declared further down) so the
+// Rejection Block section - which runs earlier in the script - can read
+// these price levels for the "RB rejecting a PLC/PHC/PL/PH" trigger.
+var float plcPrice = na
+var float plPrice  = na
+var float phcPrice = na
+var float phPrice  = na
+
+// Breaker Block POI (Stage 2c) walks a dynamic-length historical range to
+// weigh wick vs. body across a swing leg - extend the lookback Pine keeps
+// for these series so that walk doesn't get silently truncated.
+max_bars_back(close, 5000)
+max_bars_back(open, 5000)
+max_bars_back(high, 5000)
+max_bars_back(low, 5000)
+
+// ── Opening Prices ──────────────────────────────────────────────
+gOpens        = "Opening Prices"
+showTrueDay   = input.bool(true, "True Day Open (00:00)", group = gOpens)
+show0830      = input.bool(true, "8:30 Open", group = gOpens)
+show0930      = input.bool(true, "9:30 Open", group = gOpens)
+show1330      = input.bool(true, "13:30 Open", group = gOpens)
+showDailyOpen = input.bool(true, "Daily Candle Open (18:00)", group = gOpens)
+showWeeklyOpen = input.bool(true, "Weekly Open (Sun 18:00)", group = gOpens)
+
+// ── Previous Range ──────────────────────────────────────────────
+gRange           = "Previous Range"
+showPDHPDL       = input.bool(true, "Previous Day High/Low", group = gRange)
+showPWHPWL       = input.bool(true, "Previous Week High/Low", group = gRange)
+showPDRQuadrants = input.bool(true, "Previous Day Range Quadrants", group = gRange)
+
+// ── Sessions (Highs/Lows) ──────────────────────────────────────────────
+gSess        = "Sessions (Highs/Lows) - default times, adjust as needed"
+showAsia     = input.bool(true, "Asia Session H/L", group = gSess)
+asiaSession  = input.session("2000-0000", "Asia Session Time", group = gSess)
+showLondon   = input.bool(true, "London Session H/L", group = gSess)
+londonSession = input.session("0200-0500", "London Session Time", group = gSess)
+showNYAM     = input.bool(true, "NY AM Session H/L", group = gSess)
+nyamSession  = input.session("0930-1200", "NY AM Session Time", group = gSess)
+showNYPM     = input.bool(true, "NY PM Session H/L", group = gSess)
+nypmSession  = input.session("1330-1600", "NY PM Session Time", group = gSess)
+
+// ── Range Settlement (manual - formula not disclosed) ──────────────────────────────────────────────
+gRS             = "Range Settlement (manual entry)"
+rsPriceInput    = input.float(0.0, "Today's RS Price (from your RS indicator, 0 = off)", group = gRS)
+rsPrice         = rsPriceInput > 0 ? rsPriceInput : na
+showRSQuadrants = input.bool(true, "Show RS Quadrants (9:30 Open -> RS)", group = gRS)
+
+// ── Precision ──────────────────────────────────────────────
+// Clock-time events (8:30/9:30/13:30/18:00/etc) need to be detected on a
+// fixed low timeframe, not whatever timeframe the chart happens to be on -
+// a 4h or 1h chart doesn't reliably have a bar starting exactly at those
+// times, so detecting directly on the chart's own bars silently misses
+// them. Everything below is computed on `lowerTF` via request.security and
+// pulled onto whatever timeframe the chart is actually showing.
+gPrecision = "Precision"
+lowerTF    = input.timeframe("5", "Internal calc timeframe (leave at 5 unless you know why)", group = gPrecision)
+
+// ── Style ──────────────────────────────────────────────
+gStyle        = "Style"
+lineWidth     = input.int(1, "Line Width", minval = 1, group = gStyle)
+showBiasTable = input.bool(true, "Show Bias Table", group = gStyle)
+
+// ── Lower-timeframe engine (runs inside request.security) ──────────────────────────────────────────────
+f_ltfOpenAt(sessStr) =>
+    t = time(timeframe.period, sessStr, tz)
+    isNew = not na(t) and na(t[1])
+    var float v = na
+    if isNew
+        v := open
+    v
+
+f_ltfWeeklyOpen() =>
+    t = time(timeframe.period, "1800-1801", tz)
+    isSun = dayofweek(time, tz) == dayofweek.sunday
+    isNew = not na(t) and isSun and not (not na(t[1]) and dayofweek(time[1], tz) == dayofweek.sunday)
+    var float v = na
+    if isNew
+        v := open
+    v
+
+f_ltfDayHL() =>
+    t = time(timeframe.period, "1800-1801", tz)
+    isNewDay = not na(t) and na(t[1])
+    var float dH = na
+    var float dL = na
+    var float pH = na
+    var float pL = na
+    if isNewDay
+        if not na(dH)
+            pH := dH
+            pL := dL
+        dH := high
+        dL := low
+    else
+        dH := math.max(nz(dH, high), high)
+        dL := math.min(nz(dL, low), low)
+    [pH, pL]
+
+f_ltfWeekHL() =>
+    t = time(timeframe.period, "1800-1801", tz)
+    isSun = dayofweek(time, tz) == dayofweek.sunday
+    isNewWeek = not na(t) and isSun and not (not na(t[1]) and dayofweek(time[1], tz) == dayofweek.sunday)
+    var float wH = na
+    var float wL = na
+    var float pH = na
+    var float pL = na
+    if isNewWeek
+        if not na(wH)
+            pH := wH
+            pL := wL
+        wH := high
+        wL := low
+    else
+        wH := math.max(nz(wH, high), high)
+        wL := math.min(nz(wL, low), low)
+    [pH, pL]
+
+f_ltfSessionHL(sessStr) =>
+    t = time(timeframe.period, sessStr, tz)
+    inSess = not na(t)
+    isNew = inSess and na(t[1])
+    var float sH = na
+    var float sL = na
+    var float fH = na
+    var float fL = na
+    if isNew
+        sH := high
+        sL := low
+    else if inSess
+        sH := math.max(sH, high)
+        sL := math.min(sL, low)
+    justEnded = not inSess and not na(t[1])
+    if justEnded
+        fH := sH
+        fL := sL
+    [fH, fL]
+
+// ── Draw helpers (chart-timeframe side: detect a pulled value changing, redraw) ──────────────────────────────────────────────
+f_drawOnChange(v, show, col, lbl) =>
+    var float lvl = na
+    var line ln = na
+    var label la = na
+    changed = not na(v) and (na(lvl) or v != lvl)
+    if changed
+        lvl := v
+        if not na(ln)
+            line.delete(ln)
+            label.delete(la)
+        if show
+            ln := line.new(bar_index, lvl, bar_index + 1, lvl, extend = extend.right, color = col, width = lineWidth)
+            la := label.new(bar_index, lvl, lbl, style = label.style_label_left, color = color.new(col, 100), textcolor = col, size = size.small)
+    lvl
+
+f_drawHLOnChange(vH, vL, show, col, lblH, lblL, lstyle) =>
+    var float lH = na
+    var float lL = na
+    var line lnH = na
+    var line lnL = na
+    var label laH = na
+    var label laL = na
+    changed = not na(vH) and (na(lH) or vH != lH)
+    if changed
+        lH := vH
+        lL := vL
+        if not na(lnH)
+            line.delete(lnH)
+            line.delete(lnL)
+            label.delete(laH)
+            label.delete(laL)
+        if show
+            lnH := line.new(bar_index, lH, bar_index + 1, lH, extend = extend.right, color = col, width = lineWidth, style = lstyle)
+            lnL := line.new(bar_index, lL, bar_index + 1, lL, extend = extend.right, color = col, width = lineWidth, style = lstyle)
+            laH := label.new(bar_index, lH, lblH, style = label.style_label_left, color = color.new(col, 100), textcolor = col, size = size.small)
+            laL := label.new(bar_index, lL, lblL, style = label.style_label_left, color = color.new(col, 100), textcolor = col, size = size.small)
+    [lH, lL]
+
+// ── Opening Price Lines ──────────────────────────────────────────────
+ltfTrueDay = request.security(syminfo.tickerid, lowerTF, f_ltfOpenAt("0000-0001"), lookahead = barmerge.lookahead_off)
+ltf0830    = request.security(syminfo.tickerid, lowerTF, f_ltfOpenAt("0830-0831"), lookahead = barmerge.lookahead_off)
+ltf0930    = request.security(syminfo.tickerid, lowerTF, f_ltfOpenAt("0930-0931"), lookahead = barmerge.lookahead_off)
+ltf1330    = request.security(syminfo.tickerid, lowerTF, f_ltfOpenAt("1330-1331"), lookahead = barmerge.lookahead_off)
+ltfDaily   = request.security(syminfo.tickerid, lowerTF, f_ltfOpenAt("1800-1801"), lookahead = barmerge.lookahead_off)
+ltfWeekly  = request.security(syminfo.tickerid, lowerTF, f_ltfWeeklyOpen(), lookahead = barmerge.lookahead_off)
+
+trueDayOpen = f_drawOnChange(ltfTrueDay, showTrueDay, color.gray, "True Day Open")
+open0830    = f_drawOnChange(ltf0830, show0830, color.orange, "8:30 Open")
+open0930    = f_drawOnChange(ltf0930, show0930, color.blue, "9:30 Open")
+open1330    = f_drawOnChange(ltf1330, show1330, color.purple, "13:30 Open")
+dailyOpen   = f_drawOnChange(ltfDaily, showDailyOpen, color.black, "Daily Open")
+weeklyOpen  = f_drawOnChange(ltfWeekly, showWeeklyOpen, color.new(color.orange, 0), "Weekly Open")
+
+// ── Previous Day / Week High-Low ──────────────────────────────────────────────
+[ltfPDH, ltfPDL] = request.security(syminfo.tickerid, lowerTF, f_ltfDayHL(), lookahead = barmerge.lookahead_off)
+[ltfPWH, ltfPWL] = request.security(syminfo.tickerid, lowerTF, f_ltfWeekHL(), lookahead = barmerge.lookahead_off)
+
+[pdh, pdl] = f_drawHLOnChange(ltfPDH, ltfPDL, showPDHPDL, color.red, "PDH", "PDL", line.style_dashed)
+[pwh, pwl] = f_drawHLOnChange(ltfPWH, ltfPWL, showPWHPWL, color.new(color.red, 40), "PWH", "PWL", line.style_dotted)
+
+// ── PDR Quadrants ──────────────────────────────────────────────
+var line[] pdrQuadLines = array.new<line>()
+var float pdrQuadPDH = na
+pdhChanged = showPDRQuadrants and not na(pdh) and (na(pdrQuadPDH) or pdh != pdrQuadPDH)
+if pdhChanged and not na(pdl)
+    pdrQuadPDH := pdh
+    if array.size(pdrQuadLines) > 0
+        for i = 0 to array.size(pdrQuadLines) - 1
+            line.delete(array.get(pdrQuadLines, i))
+        array.clear(pdrQuadLines)
+    rng = pdh - pdl
+    for q = 0 to 4
+        lvl = pdl + rng * (q / 4.0)
+        qLine = line.new(bar_index, lvl, bar_index + 1, lvl, extend = extend.right, color = color.new(color.gray, 60), width = 1, style = line.style_dotted)
+        array.push(pdrQuadLines, qLine)
+
+// ── Session Highs/Lows ──────────────────────────────────────────────
+[ltfAsiaH, ltfAsiaL]     = request.security(syminfo.tickerid, lowerTF, f_ltfSessionHL(asiaSession), lookahead = barmerge.lookahead_off)
+[ltfLondonH, ltfLondonL] = request.security(syminfo.tickerid, lowerTF, f_ltfSessionHL(londonSession), lookahead = barmerge.lookahead_off)
+[ltfNYAMH, ltfNYAML]     = request.security(syminfo.tickerid, lowerTF, f_ltfSessionHL(nyamSession), lookahead = barmerge.lookahead_off)
+[ltfNYPMH, ltfNYPML]     = request.security(syminfo.tickerid, lowerTF, f_ltfSessionHL(nypmSession), lookahead = barmerge.lookahead_off)
+
+[asiaH, asiaL]     = f_drawHLOnChange(ltfAsiaH, ltfAsiaL, showAsia, color.fuchsia, "Asia High", "Asia Low", line.style_solid)
+[londonH, londonL] = f_drawHLOnChange(ltfLondonH, ltfLondonL, showLondon, color.teal, "London High", "London Low", line.style_solid)
+[nyamH, nyamL]     = f_drawHLOnChange(ltfNYAMH, ltfNYAML, showNYAM, color.blue, "NY AM High", "NY AM Low", line.style_solid)
+[nypmH, nypmL]     = f_drawHLOnChange(ltfNYPMH, ltfNYPML, showNYPM, color.navy, "NY PM High", "NY PM Low", line.style_solid)
+
+// ── Range Settlement (manual) ──────────────────────────────────────────────
+var line rsLine = na
+var line[] rsQuadLines = array.new<line>()
+if not na(rsPrice)
+    if barstate.isfirst or na(rsLine)
+        rsLine := line.new(bar_index, rsPrice, bar_index + 1, rsPrice, extend = extend.right, color = color.red, width = lineWidth + 1)
+    else
+        line.set_y1(rsLine, rsPrice)
+        line.set_y2(rsLine, rsPrice)
+
+var float rsQuadOpen0930 = na
+open0930Changed = showRSQuadrants and not na(open0930) and not na(rsPrice) and (na(rsQuadOpen0930) or open0930 != rsQuadOpen0930)
+if open0930Changed
+    rsQuadOpen0930 := open0930
+    if array.size(rsQuadLines) > 0
+        for i = 0 to array.size(rsQuadLines) - 1
+            line.delete(array.get(rsQuadLines, i))
+        array.clear(rsQuadLines)
+    rng2 = rsPrice - open0930
+    for q = 0 to 4
+        lvl = open0930 + rng2 * (q / 4.0)
+        qLine2 = line.new(bar_index, lvl, bar_index + 1, lvl, extend = extend.right, color = color.new(color.red, 60), width = 1, style = line.style_dotted)
+        array.push(rsQuadLines, qLine2)
+
+// ══════════════════════════════════════════════════════════════════
+// STAGE 2a: PD ARRAYS — Order Blocks
+// ══════════════════════════════════════════════════════════════════
+// Bullish OB: the last down-close candle before a strong up expansion.
+// Bearish OB: the last up-close candle before a strong down expansion.
+// POI: the OB candle's opening price if its wick > body, otherwise the CE
+// (midpoint of the full candle range). One active OB per direction at a
+// time - a new one only replaces the old once it's been tapped.
+//
+// Known limitation: this only catches the OB candle sitting immediately
+// before the expansion leg. Your notes showed a valid example where a
+// small pullback/consolidation sits between the true OB candle and the
+// actual expansion - that variant isn't detected yet.
+
+gOB                = "Order Blocks"
+useOB              = input.bool(true, "Show Order Blocks", group = gOB)
+obLookback         = input.int(20, "Avg range lookback (bars)", minval = 5, group = gOB)
+obDisplacementMult = input.float(1.5, "Min displacement (x avg range)", minval = 1.0, group = gOB)
+obWidthBars        = input.int(6, "OB box width (bars)", minval = 1, group = gOB)
+bullOBColor        = input.color(color.new(color.teal, 80), "Bullish OB color", group = gOB)
+bearOBColor        = input.color(color.new(color.red, 80), "Bearish OB color", group = gOB)
+
+avgRange     = ta.sma(high - low, obLookback)
+displacement = (high - low) > avgRange * obDisplacementMult
+
+bullOBevent = close[1] < open[1] and close > high[1] and displacement
+bearOBevent = close[1] > open[1] and close < low[1] and displacement
+
+obBody1        = math.abs(close[1] - open[1])
+obWick1        = (high[1] - low[1]) - obBody1
+obUseOpenPrice = obWick1 > obBody1
+obPOI          = obUseOpenPrice ? open[1] : (high[1] + low[1]) / 2
+
+var box   bullOBBox   = na
+var float bullOBTopV  = na
+var float bullOBBotV  = na
+var float bullOBPOIv  = na
+var line  bullOBPOIln = na
+
+var box   bearOBBox   = na
+var float bearOBTopV  = na
+var float bearOBBotV  = na
+var float bearOBPOIv  = na
+var line  bearOBPOIln = na
+
+// tap-check runs before creation so a same-bar tap-then-reform works
+if not na(bullOBBox)
+    if low <= bullOBTopV and high >= bullOBBotV
+        box.delete(bullOBBox)
+        line.delete(bullOBPOIln)
+        bullOBBox := na
+    else
+        box.set_left(bullOBBox, bar_index - obWidthBars + 1)
+        box.set_right(bullOBBox, bar_index + 1)
+        line.set_x1(bullOBPOIln, bar_index - obWidthBars + 1)
+        line.set_x2(bullOBPOIln, bar_index + 1)
+
+if not na(bearOBBox)
+    if low <= bearOBTopV and high >= bearOBBotV
+        box.delete(bearOBBox)
+        line.delete(bearOBPOIln)
+        bearOBBox := na
+    else
+        box.set_left(bearOBBox, bar_index - obWidthBars + 1)
+        box.set_right(bearOBBox, bar_index + 1)
+        line.set_x1(bearOBPOIln, bar_index - obWidthBars + 1)
+        line.set_x2(bearOBPOIln, bar_index + 1)
+
+if useOB and bullOBevent and na(bullOBBox)
+    bullOBTopV  := high[1]
+    bullOBBotV  := low[1]
+    bullOBPOIv  := obPOI
+    bullOBBox   := box.new(bar_index - obWidthBars + 1, bullOBTopV, bar_index + 1, bullOBBotV, border_color = color.teal, bgcolor = bullOBColor, extend = extend.none)
+    bullOBPOIln := line.new(bar_index - obWidthBars + 1, bullOBPOIv, bar_index + 1, bullOBPOIv, color = color.teal, width = 1, style = line.style_dashed)
+
+if useOB and bearOBevent and na(bearOBBox)
+    bearOBTopV  := high[1]
+    bearOBBotV  := low[1]
+    bearOBPOIv  := obPOI
+    bearOBBox   := box.new(bar_index - obWidthBars + 1, bearOBTopV, bar_index + 1, bearOBBotV, border_color = color.red, bgcolor = bearOBColor, extend = extend.none)
+    bearOBPOIln := line.new(bar_index - obWidthBars + 1, bearOBPOIv, bar_index + 1, bearOBPOIv, color = color.red, width = 1, style = line.style_dashed)
+
+// ══════════════════════════════════════════════════════════════════
+// STAGE 2b: PD ARRAYS — Rejection Blocks & Inverse Rejection Blocks
+// ══════════════════════════════════════════════════════════════════
+// RB forms from a wick that rejects a swept high/low, OR from a wick that
+// rejects a PLC/PHC/PL/PH (Group Class #5) - lower probability from a
+// PLC/PHC, higher probability from a PL/PH; RBs formed this way get a small
+// "RB-PLC"/"RB-PL" (or PHC/PH) tag so the origin is visible on the chart.
+// Fib anchored to the candle's own high(1)/low(0), CE(0.5) = midpoint:
+//   Bullish RB (rejects lower prices): use top(1) and CE(0.5), never bottom(0).
+//   Bearish RB (rejects higher prices): use bottom(0) and CE(0.5), never top(1).
+// iRB forms when an RB's full range gets closed through (not just touched) -
+// it inverts, and the *new* direction's usage rule applies to the same box.
+//
+// Failure Swing + RB: if the candle *immediately after* an RB forms wicks
+// into the RB's range but fails to reach CE(0.5), it upgrades to FS+RB and
+// the POI shifts: if the wick reached the secondary quadrant (0.75 for
+// bullish, 0.25 for bearish), focus moves to CE; if it didn't even reach
+// that quadrant, focus moves to the quadrant itself instead of CE.
+//
+// RB/iRB now track up to rbMaxZones concurrent zones PER DIRECTION instead
+// of one. A single-slot design silently blocked new, valid RBs from forming
+// any time an older one was still sitting unconsumed - common during a
+// fast, one-directional move where several genuine rejection wicks print in
+// a row. Zones extend right from their own formation bar instead of sliding
+// to hug the current bar, since with several zones live at once there's no
+// single "current" position to slide to.
+//
+// Not yet implemented (follow-up pass): RB rejecting another RB (the rare
+// case, only valid once price has already traded through the original RB's
+// CE).
+
+type RBZone
+    box   b
+    line  poiLn
+    float top
+    float bot
+    int   formedBar
+
+gRB            = "Rejection Blocks"
+useRB          = input.bool(true, "Show Rejection Blocks / iRB", group = gRB)
+useFSRB        = input.bool(true, "Reclassify as Failure Swing RB when applicable", group = gRB)
+rbWickRatio    = input.float(50, "Min wick (% of candle range)", minval = 0, maxval = 100, group = gRB) / 100
+rbSweepLookback = input.int(20, "Sweep reference lookback (bars)", minval = 5, group = gRB)
+rbSweepTicks   = input.int(1, "Min sweep beyond prior extreme (ticks)", minval = 0, group = gRB)
+rbWidthBars    = input.int(6, "RB/iRB box width at formation (bars)", minval = 1, group = gRB)
+rbMaxZones     = input.int(10, "Max concurrent RB/iRB zones per direction", minval = 1, group = gRB)
+bullRBColor    = input.color(color.new(color.teal, 85), "Bullish RB color", group = gRB)
+bearRBColor    = input.color(color.new(color.red, 85), "Bearish RB color", group = gRB)
+bullIRBColor   = input.color(color.new(color.blue, 80), "Bullish iRB color", group = gRB)
+bearIRBColor   = input.color(color.new(color.orange, 80), "Bearish iRB color", group = gRB)
+
+rbBarRange = high - low
+rbUpperWick = high - math.max(open, close)
+rbLowerWick = math.min(open, close) - low
+
+rbPriorHigh = ta.highest(high, rbSweepLookback)[1]
+rbPriorLow  = ta.lowest(low, rbSweepLookback)[1]
+rbSweptHigh = not na(rbPriorHigh) and high >= rbPriorHigh + rbSweepTicks * tick
+rbSweptLow  = not na(rbPriorLow) and low <= rbPriorLow - rbSweepTicks * tick
+
+// RB can also form from rejecting a PLC/PHC or PL/PH (Group Class #5) - lower
+// probability from a PLC/PHC, higher probability from a PL/PH, per the notes.
+// These read last bar's PLC/PHC/PL/PH state since Stage 3 runs later in the
+// script this same bar.
+bullRBTouchPL  = not na(plPrice)  and low <= plPrice  and high >= plPrice
+bullRBTouchPLC = not na(plcPrice) and low <= plcPrice and high >= plcPrice
+bearRBTouchPH  = not na(phPrice)  and high >= phPrice  and low <= phPrice
+bearRBTouchPHC = not na(phcPrice) and high >= phcPrice and low <= phcPrice
+
+bullRBevent = useRB and rbBarRange > 0 and (rbLowerWick / rbBarRange) >= rbWickRatio and (rbSweptLow or bullRBTouchPL or bullRBTouchPLC)
+bearRBevent = useRB and rbBarRange > 0 and (rbUpperWick / rbBarRange) >= rbWickRatio and (rbSweptHigh or bearRBTouchPH or bearRBTouchPHC)
+
+var array<RBZone> bullRBZones  = array.new<RBZone>()
+var array<RBZone> bearRBZones  = array.new<RBZone>()
+var array<RBZone> bullIRBZones = array.new<RBZone>()
+var array<RBZone> bearIRBZones = array.new<RBZone>()
+
+f_rbNew(left, top, bot, col) =>
+    ce = (top + bot) / 2
+    b  = box.new(left, top, bar_index + 1, bot, border_color = col, bgcolor = color.new(col, 80), extend = extend.right)
+    ln = line.new(left, ce, bar_index + 1, ce, color = col, width = 1, style = line.style_dashed, extend = extend.right)
+    RBZone.new(b = b, poiLn = ln, top = top, bot = bot, formedBar = bar_index)
+
+// ── iRB: plain tap-check first (runs before RB invert-check below, so a
+// freshly-spawned iRB this bar isn't immediately self-tapped by the same
+// bar's data that created it) ──────────────────────────────────────────────
+if array.size(bullIRBZones) > 0
+    for idx = array.size(bullIRBZones) - 1 to 0
+        zoneBI = array.get(bullIRBZones, idx)
+        if low <= zoneBI.top and high >= zoneBI.bot
+            box.delete(zoneBI.b)
+            line.delete(zoneBI.poiLn)
+            array.remove(bullIRBZones, idx)
+
+if array.size(bearIRBZones) > 0
+    for idx = array.size(bearIRBZones) - 1 to 0
+        zoneRI = array.get(bearIRBZones, idx)
+        if low <= zoneRI.top and high >= zoneRI.bot
+            box.delete(zoneRI.b)
+            line.delete(zoneRI.poiLn)
+            array.remove(bearIRBZones, idx)
+
+// ── Bullish RB: tap / invert-check ──────────────────────────────────────────────
+if array.size(bullRBZones) > 0
+    for idx = array.size(bullRBZones) - 1 to 0
+        zoneBR = array.get(bullRBZones, idx)
+        if close < zoneBR.bot
+            // closed fully through -> inverts to a bearish iRB (use bottom+CE, not top)
+            box.delete(zoneBR.b)
+            line.delete(zoneBR.poiLn)
+            array.remove(bullRBZones, idx)
+            if array.size(bearIRBZones) < rbMaxZones
+                array.push(bearIRBZones, f_rbNew(zoneBR.formedBar, zoneBR.top, zoneBR.bot, color.orange))
+        else if low <= (zoneBR.top + zoneBR.bot) / 2
+            // reached/passed CE -> considered consumed (a shallow wick that stops short
+            // of CE is left alive so the FS+RB check below can still evaluate it)
+            box.delete(zoneBR.b)
+            line.delete(zoneBR.poiLn)
+            array.remove(bullRBZones, idx)
+
+// ── Bearish RB: tap / invert-check ──────────────────────────────────────────────
+if array.size(bearRBZones) > 0
+    for idx = array.size(bearRBZones) - 1 to 0
+        zoneRR = array.get(bearRBZones, idx)
+        if close > zoneRR.top
+            // closed fully through -> inverts to a bullish iRB (use top+CE, not bottom)
+            box.delete(zoneRR.b)
+            line.delete(zoneRR.poiLn)
+            array.remove(bearRBZones, idx)
+            if array.size(bullIRBZones) < rbMaxZones
+                array.push(bullIRBZones, f_rbNew(zoneRR.formedBar, zoneRR.top, zoneRR.bot, color.blue))
+        else if high >= (zoneRR.top + zoneRR.bot) / 2
+            box.delete(zoneRR.b)
+            line.delete(zoneRR.poiLn)
+            array.remove(bearRBZones, idx)
+
+// ── New RB formation ──────────────────────────────────────────────
+if bullRBevent and array.size(bullRBZones) < rbMaxZones
+    array.push(bullRBZones, f_rbNew(bar_index - rbWidthBars + 1, high, low, color.teal))
+    if not rbSweptLow
+        // formed from a PLC/PHC or PL/PH rejection instead of a liquidity sweep -
+        // tagged so the new pathway is visually distinguishable from the
+        // already-verified sweep-based RBs during testing
+        label.new(bar_index, low, bullRBTouchPL ? "RB-PL" : "RB-PLC", style = label.style_label_up, color = color.new(color.teal, 100), textcolor = color.teal, size = size.tiny)
+
+if bearRBevent and array.size(bearRBZones) < rbMaxZones
+    array.push(bearRBZones, f_rbNew(bar_index - rbWidthBars + 1, high, low, color.red))
+    if not rbSweptHigh
+        label.new(bar_index, high, bearRBTouchPH ? "RB-PH" : "RB-PHC", style = label.style_label_down, color = color.new(color.red, 100), textcolor = color.red, size = size.tiny)
+
+// ── Failure Swing + RB reclassification ──────────────────────────────────────────────
+// Checked exactly once, on the bar immediately after an RB forms - only
+// ever applies to the most recently formed zone per direction.
+if useFSRB and array.size(bullRBZones) > 0
+    lastBull = array.get(bullRBZones, array.size(bullRBZones) - 1)
+    if bar_index == lastBull.formedBar + 1
+        ceCheck  = (lastBull.top + lastBull.bot) / 2
+        q75Check = lastBull.bot + 0.75 * (lastBull.top - lastBull.bot)
+        fsBull   = low < lastBull.top and low > ceCheck
+        if fsBull
+            newPOI = low <= q75Check ? ceCheck : q75Check
+            line.set_y1(lastBull.poiLn, newPOI)
+            line.set_y2(lastBull.poiLn, newPOI)
+            label.new(bar_index, newPOI, "FS", style = label.style_label_up, color = color.new(color.teal, 100), textcolor = color.teal, size = size.tiny)
+
+if useFSRB and array.size(bearRBZones) > 0
+    lastBear = array.get(bearRBZones, array.size(bearRBZones) - 1)
+    if bar_index == lastBear.formedBar + 1
+        ceCheck2  = (lastBear.top + lastBear.bot) / 2
+        q25Check  = lastBear.bot + 0.25 * (lastBear.top - lastBear.bot)
+        fsBear    = high > lastBear.bot and high < ceCheck2
+        if fsBear
+            newPOI2 = high >= q25Check ? ceCheck2 : q25Check
+            line.set_y1(lastBear.poiLn, newPOI2)
+            line.set_y2(lastBear.poiLn, newPOI2)
+            label.new(bar_index, newPOI2, "FS", style = label.style_label_down, color = color.new(color.red, 100), textcolor = color.red, size = size.tiny)
+
+// ============================================================================
+// STAGE 2c: Breaker Blocks (corrected against @invisibility's Group Class #5)
+// ============================================================================
+// Bullish Breaker: swing Low(A) -> swing High(B) -> Lower Low(C, sweeps below A)
+// -> close breaks back above B (structure flips up). The zone is the candles
+// that produced the ORIGINAL Low(A) -> High(B) move, extended forward - not
+// the B-to-C sweep leg.
+//
+// Bearish Breaker: swing High(A) -> swing Low(B) -> Higher High(C, sweeps above A)
+// -> close breaks back below B (structure flips down). The zone is the candles
+// that produced the ORIGINAL High(A) -> Low(B) move, extended forward.
+//
+// POI: same wick-vs-body rule as Order Blocks, assessed across the whole A-to-B
+// leg - if the leg's combined wicks outweigh its combined bodies, use the
+// opening price of candle A; otherwise use CE (midpoint of the zone).
+//
+// External liquidity sweep bonus: if the sweep (C) also takes out a tracked
+// external liquidity level (PDH/PDL/PWH/PWL or a session high/low), the breaker
+// is tagged "Breaker+" instead of plain "Breaker".
+
+gBRK          = "Breaker Blocks"
+useBRK        = input.bool(true, "Show Breaker Blocks", group = gBRK)
+brkPivotLen   = input.int(5, "Swing pivot length (bars each side)", minval = 1, group = gBRK)
+brkSweepTicks = input.int(1, "Min sweep beyond swing (ticks)", minval = 0, group = gBRK)
+brkWidthBars  = input.int(6, "Box width (bars)", minval = 1, group = gBRK)
+bullBRKColor  = input.color(color.new(color.lime, 82), "Bullish Breaker color", group = gBRK)
+bearBRKColor  = input.color(color.new(color.maroon, 82), "Bearish Breaker color", group = gBRK)
+
+brkPH = ta.pivothigh(high, brkPivotLen, brkPivotLen)
+brkPL = ta.pivotlow(low, brkPivotLen, brkPivotLen)
+
+var float lastSwingH    = na
+var float lastSwingL    = na
+var int   lastSwingHBar = na
+var int   lastSwingLBar = na
+
+// pending bullish candidate: the A(swing low) -> B(swing high) leg, captured
+// the moment B forms; only the *sweep* trigger and confirmation are pending.
+var float bullBrkABot     = na
+var float bullBrkBTop     = na
+var int   bullBrkABar     = na
+var int   bullBrkBBar     = na
+var bool  bullBrkSwept    = false
+var bool  bullBrkExtSweep = false
+
+// pending bearish candidate: the A(swing high) -> B(swing low) leg
+var float bearBrkATop     = na
+var float bearBrkBBot     = na
+var int   bearBrkABar     = na
+var int   bearBrkBBar     = na
+var bool  bearBrkSwept    = false
+var bool  bearBrkExtSweep = false
+
+var box   bullBRKBox   = na
+var float bullBRKTop   = na
+var float bullBRKBot   = na
+var float bullBRKPOIv  = na
+var line  bullBRKPOIln = na
+var label bullBRKLbl   = na
+
+var box   bearBRKBox   = na
+var float bearBRKTop   = na
+var float bearBRKBot   = na
+var float bearBRKPOIv  = na
+var line  bearBRKPOIln = na
+var label bearBRKLbl   = na
+
+// wick-vs-body POI across the full A-to-B leg (falls back to CE if the leg is
+// implausibly wide, to avoid requesting more historical bars than sensible)
+f_brkPOI(aBar, bBar, topVal, botVal) =>
+    off1  = bar_index - bBar
+    off2  = bar_index - aBar
+    ceVal = (topVal + botVal) / 2
+    poi = ceVal
+    if off2 < 4500 and off2 >= off1
+        sumBody = 0.0
+        sumWick = 0.0
+        for i = off1 to off2
+            sumBody += math.abs(close[i] - open[i])
+            sumWick += (high[i] - low[i]) - math.abs(close[i] - open[i])
+        poi := sumWick > sumBody ? open[off2] : ceVal
+    poi
+
+if useBRK
+    // a new confirmed swing high -> capture the A(prior swing low) -> B(this high) candidate
+    if not na(brkPH)
+        newHigh    = brkPH
+        newHighBar = bar_index - brkPivotLen
+        if not na(lastSwingL)
+            bullBrkABot  := lastSwingL
+            bullBrkBTop  := newHigh
+            bullBrkABar  := lastSwingLBar
+            bullBrkBBar  := newHighBar
+            bullBrkSwept := false
+        lastSwingH    := newHigh
+        lastSwingHBar := newHighBar
+
+    // a new confirmed swing low -> capture the A(prior swing high) -> B(this low) candidate
+    if not na(brkPL)
+        newLow    = brkPL
+        newLowBar = bar_index - brkPivotLen
+        if not na(lastSwingH)
+            bearBrkATop  := lastSwingH
+            bearBrkBBot  := newLow
+            bearBrkABar  := lastSwingHBar
+            bearBrkBBar  := newLowBar
+            bearBrkSwept := false
+        lastSwingL    := newLow
+        lastSwingLBar := newLowBar
+
+    // does this new low sweep below the pending bullish candidate's A?
+    if not na(brkPL)
+        sweepLow = brkPL
+        if not na(bullBrkABot) and not bullBrkSwept and sweepLow <= bullBrkABot - brkSweepTicks * tick
+            bullBrkSwept    := true
+            bullBrkExtSweep := (not na(pdl) and sweepLow <= pdl) or (not na(pwl) and sweepLow <= pwl) or
+                                 (not na(asiaL) and sweepLow <= asiaL) or (not na(londonL) and sweepLow <= londonL) or
+                                 (not na(nyamL) and sweepLow <= nyamL) or (not na(nypmL) and sweepLow <= nypmL)
+
+    // does this new high sweep above the pending bearish candidate's A?
+    if not na(brkPH)
+        sweepHigh = brkPH
+        if not na(bearBrkATop) and not bearBrkSwept and sweepHigh >= bearBrkATop + brkSweepTicks * tick
+            bearBrkSwept    := true
+            bearBrkExtSweep := (not na(pdh) and sweepHigh >= pdh) or (not na(pwh) and sweepHigh >= pwh) or
+                                 (not na(asiaH) and sweepHigh >= asiaH) or (not na(londonH) and sweepHigh >= londonH) or
+                                 (not na(nyamH) and sweepHigh >= nyamH) or (not na(nypmH) and sweepHigh >= nypmH)
+
+    // confirmation: close breaks back through B -> spawn the breaker using the A-to-B leg
+    if bullBrkSwept and close > bullBrkBTop
+        bullBrkSwept := false
+        if na(bullBRKBox)
+            bullBRKTop   := bullBrkBTop
+            bullBRKBot   := bullBrkABot
+            bullBRKPOIv  := f_brkPOI(bullBrkABar, bullBrkBBar, bullBRKTop, bullBRKBot)
+            bullBRKBox   := box.new(bar_index - brkWidthBars + 1, bullBRKTop, bar_index + 1, bullBRKBot, border_color = color.lime, bgcolor = bullBRKColor, extend = extend.none)
+            bullBRKPOIln := line.new(bar_index - brkWidthBars + 1, bullBRKPOIv, bar_index + 1, bullBRKPOIv, color = color.lime, width = 1, style = line.style_dashed)
+            bullBRKLbl   := label.new(bar_index + 1, bullBRKBot, bullBrkExtSweep ? "Breaker+" : "Breaker", style = label.style_label_up, color = color.new(color.lime, 100), textcolor = color.lime, size = size.tiny)
+
+    if bearBrkSwept and close < bearBrkBBot
+        bearBrkSwept := false
+        if na(bearBRKBox)
+            bearBRKTop   := bearBrkATop
+            bearBRKBot   := bearBrkBBot
+            bearBRKPOIv  := f_brkPOI(bearBrkABar, bearBrkBBar, bearBRKTop, bearBRKBot)
+            bearBRKBox   := box.new(bar_index - brkWidthBars + 1, bearBRKTop, bar_index + 1, bearBRKBot, border_color = color.maroon, bgcolor = bearBRKColor, extend = extend.none)
+            bearBRKPOIln := line.new(bar_index - brkWidthBars + 1, bearBRKPOIv, bar_index + 1, bearBRKPOIv, color = color.maroon, width = 1, style = line.style_dashed)
+            bearBRKLbl   := label.new(bar_index + 1, bearBRKTop, bearBrkExtSweep ? "Breaker+" : "Breaker", style = label.style_label_down, color = color.new(color.maroon, 100), textcolor = color.maroon, size = size.tiny)
+
+// ── Bullish Breaker: invalidate / tap-check ──────────────────────────────────────────────
+if not na(bullBRKBox)
+    if close < bullBRKBot
+        // closed back below the zone -> breaker failed, remove it
+        box.delete(bullBRKBox)
+        line.delete(bullBRKPOIln)
+        label.delete(bullBRKLbl)
+        bullBRKBox := na
+    else if low <= bullBRKPOIv
+        // reached/passed its POI -> considered used
+        box.delete(bullBRKBox)
+        line.delete(bullBRKPOIln)
+        label.delete(bullBRKLbl)
+        bullBRKBox := na
+    else
+        box.set_left(bullBRKBox, bar_index - brkWidthBars + 1)
+        box.set_right(bullBRKBox, bar_index + 1)
+        line.set_x1(bullBRKPOIln, bar_index - brkWidthBars + 1)
+        line.set_x2(bullBRKPOIln, bar_index + 1)
+        label.set_x(bullBRKLbl, bar_index + 1)
+
+// ── Bearish Breaker: invalidate / tap-check ──────────────────────────────────────────────
+if not na(bearBRKBox)
+    if close > bearBRKTop
+        // closed back above the zone -> breaker failed, remove it
+        box.delete(bearBRKBox)
+        line.delete(bearBRKPOIln)
+        label.delete(bearBRKLbl)
+        bearBRKBox := na
+    else if high >= bearBRKPOIv
+        // reached/passed its POI -> considered used
+        box.delete(bearBRKBox)
+        line.delete(bearBRKPOIln)
+        label.delete(bearBRKLbl)
+        bearBRKBox := na
+    else
+        box.set_left(bearBRKBox, bar_index - brkWidthBars + 1)
+        box.set_right(bearBRKBox, bar_index + 1)
+        line.set_x1(bearBRKPOIln, bar_index - brkWidthBars + 1)
+        line.set_x2(bearBRKPOIln, bar_index + 1)
+        label.set_x(bearBRKLbl, bar_index + 1)
+
+// ============================================================================
+// STAGE 3a: Fair Value Gaps (internal engine - feeds PLC/PHC below)
+// ============================================================================
+// Bullish FVG: 3-candle gap where low > high[2]. Bearish FVG: high < low[2].
+// Per @invisibility's IFVG definition, a FVG stays "respected" until a candle
+// CLOSES through it - a wick tag does not invalidate it (that's exactly how a
+// PLC/PHC swing is allowed to form inside one). Only the most recent
+// unmitigated FVG per direction is tracked, since that's all PLC/PHC needs.
+
+gFVG    = "Fair Value Gaps (PLC/PHC engine)"
+showFVG = input.bool(false, "Show internal FVGs (debug)", group = gFVG)
+
+bullFVGnew = low > high[2]
+bearFVGnew = high < low[2]
+
+var float bullFVGTop    = na
+var float bullFVGBot    = na
+var int   bullFVGBar    = na
+var box   bullFVGBoxViz = na
+
+var float bearFVGTop    = na
+var float bearFVGBot    = na
+var int   bearFVGBar    = na
+var box   bearFVGBoxViz = na
+
+if bullFVGnew
+    bullFVGTop := low
+    bullFVGBot := high[2]
+    bullFVGBar := bar_index
+    if not na(bullFVGBoxViz)
+        box.delete(bullFVGBoxViz)
+        bullFVGBoxViz := na
+    if showFVG
+        bullFVGBoxViz := box.new(bar_index - 2, bullFVGTop, bar_index, bullFVGBot, border_color = color.new(color.blue, 40), bgcolor = color.new(color.blue, 90), extend = extend.right)
+
+// IFVG: "forms when a FVG receives a candle close through it on the same
+// timeframe it was created on" - the invalidation IS the IFVG event, just
+// surfaced as its own flag so Stage 5c can watch for it as confirmation.
+ifvgBull = false
+ifvgBear = false
+
+if not na(bullFVGBar) and close < bullFVGBot
+    bullFVGBar := na
+    ifvgBear := true
+    if not na(bullFVGBoxViz)
+        box.delete(bullFVGBoxViz)
+        bullFVGBoxViz := na
+
+if bearFVGnew
+    bearFVGTop := low[2]
+    bearFVGBot := high
+    bearFVGBar := bar_index
+    if not na(bearFVGBoxViz)
+        box.delete(bearFVGBoxViz)
+        bearFVGBoxViz := na
+    if showFVG
+        bearFVGBoxViz := box.new(bar_index - 2, bearFVGTop, bar_index, bearFVGBot, border_color = color.new(color.red, 40), bgcolor = color.new(color.red, 90), extend = extend.right)
+
+if not na(bearFVGBar) and close > bearFVGTop
+    bearFVGBar := na
+    ifvgBull := true
+    if not na(bearFVGBoxViz)
+        box.delete(bearFVGBoxViz)
+        bearFVGBoxViz := na
+
+// ============================================================================
+// STAGE 3b: Protected Low/High Catalyst (PLC/PHC) + Protected Low/High (PL/PH)
+// ============================================================================
+// PLC: a swing low that forms INSIDE an active (unmitigated) bullish FVG while
+// that FVG is being respected - the first swing low that can later cause a PL.
+// PHC: mirror, inside a bearish FVG.
+//
+// PL: forms after a PLC, when price returns and sweeps the PLC (a NEW, SEPARATE
+// swing low at/through the PLC's price), then reacts away. PH: mirror.
+//
+// Protection Range Rule: a PL is only protected from itself up to the most
+// recent internal high formed after it - once price closes through that
+// internal high, the PL is no longer treated as protected. PH: mirror with
+// internal lows.
+
+gPLPHC         = "PLC/PHC + PL/PH"
+usePLPHC       = input.bool(true, "Show PLC/PHC + PL/PH", group = gPLPHC)
+plphPivotLen   = input.int(3, "Swing pivot length (bars each side)", minval = 1, group = gPLPHC)
+plphSweepTicks = input.int(1, "Min sweep beyond catalyst (ticks)", minval = 0, group = gPLPHC)
+plcColor       = input.color(color.blue, "PLC color", group = gPLPHC)
+plColor        = input.color(color.new(color.blue, 0), "PL color", group = gPLPHC)
+phcColor       = input.color(color.orange, "PHC color", group = gPLPHC)
+phColor        = input.color(color.new(color.orange, 0), "PH color", group = gPLPHC)
+
+swPH = ta.pivothigh(high, plphPivotLen, plphPivotLen)
+swPL = ta.pivotlow(low, plphPivotLen, plphPivotLen)
+
+// plcPrice/plPrice/phcPrice/phPrice are declared near the top of the script
+// (hoisted for the Rejection Block section) - only their companion state
+// lives here.
+var int   plcBar   = na
+var bool  plcActive = false
+var line  plcLine  = na
+var label plcLbl   = na
+
+var int   plBar        = na
+var bool  plProtected  = false
+var float plInternalHigh = na
+var line  plLine = na
+var label plLbl  = na
+
+var int   phcBar   = na
+var bool  phcActive = false
+var line  phcLine  = na
+var label phcLbl   = na
+
+var int   phBar        = na
+var bool  phProtected  = false
+var float phInternalLow = na
+var line  phLine = na
+var label phLbl  = na
+
+if usePLPHC
+    // ── PL: price returns, sweeps the existing PLC, forms a new separate swing low ──
+    if plcActive and not na(swPL)
+        pivotBarPL = bar_index - plphPivotLen
+        pivotValPL = swPL
+        if pivotBarPL > plcBar and pivotValPL <= plcPrice + plphSweepTicks * tick
+            if not na(plcLine)
+                line.delete(plcLine)
+                label.delete(plcLbl)
+            if not na(plLine)
+                line.delete(plLine)
+                label.delete(plLbl)
+            plPrice        := pivotValPL
+            plBar          := pivotBarPL
+            plProtected    := true
+            plInternalHigh := na
+            plcActive      := false
+            plLine := line.new(pivotBarPL, plPrice, bar_index, plPrice, color = plColor, width = 2, style = line.style_solid, extend = extend.right)
+            plLbl  := label.new(pivotBarPL, plPrice, "PL", style = label.style_label_up, color = color.new(plColor, 100), textcolor = plColor, size = size.small)
+
+    // ── PH: price returns, sweeps the existing PHC, forms a new separate swing high ──
+    if phcActive and not na(swPH)
+        pivotBarPH = bar_index - plphPivotLen
+        pivotValPH = swPH
+        if pivotBarPH > phcBar and pivotValPH >= phcPrice - plphSweepTicks * tick
+            if not na(phcLine)
+                line.delete(phcLine)
+                label.delete(phcLbl)
+            if not na(phLine)
+                line.delete(phLine)
+                label.delete(phLbl)
+            phPrice       := pivotValPH
+            phBar         := pivotBarPH
+            phProtected   := true
+            phInternalLow := na
+            phcActive     := false
+            phLine := line.new(pivotBarPH, phPrice, bar_index, phPrice, color = phColor, width = 2, style = line.style_solid, extend = extend.right)
+            phLbl  := label.new(pivotBarPH, phPrice, "PH", style = label.style_label_down, color = color.new(phColor, 100), textcolor = phColor, size = size.small)
+
+    // ── PLC: swing low forming inside an active, respected bullish FVG ──
+    if not na(swPL)
+        pivotBarC = bar_index - plphPivotLen
+        pivotValC = swPL
+        if not na(bullFVGBar) and pivotBarC >= bullFVGBar and pivotValC <= bullFVGTop and pivotValC >= bullFVGBot
+            if not na(plcLine)
+                line.delete(plcLine)
+                label.delete(plcLbl)
+            plcPrice  := pivotValC
+            plcBar    := pivotBarC
+            plcActive := true
+            plcLine   := line.new(pivotBarC, plcPrice, bar_index, plcPrice, color = plcColor, width = 1, style = line.style_dotted, extend = extend.right)
+            plcLbl    := label.new(pivotBarC, plcPrice, "PLC", style = label.style_label_up, color = color.new(plcColor, 100), textcolor = plcColor, size = size.tiny)
+
+    // ── PHC: swing high forming inside an active, respected bearish FVG ──
+    if not na(swPH)
+        pivotBarHC = bar_index - plphPivotLen
+        pivotValHC = swPH
+        if not na(bearFVGBar) and pivotBarHC >= bearFVGBar and pivotValHC <= bearFVGTop and pivotValHC >= bearFVGBot
+            if not na(phcLine)
+                line.delete(phcLine)
+                label.delete(phcLbl)
+            phcPrice  := pivotValHC
+            phcBar    := pivotBarHC
+            phcActive := true
+            phcLine   := line.new(pivotBarHC, phcPrice, bar_index, phcPrice, color = phcColor, width = 1, style = line.style_dotted, extend = extend.right)
+            phcLbl    := label.new(pivotBarHC, phcPrice, "PHC", style = label.style_label_down, color = color.new(phcColor, 100), textcolor = phcColor, size = size.tiny)
+
+    // ── Protection Range Rule: PL protected up to the last internal high after it ──
+    if plProtected
+        if not na(swPH)
+            pivotBarIH = bar_index - plphPivotLen
+            if pivotBarIH > plBar
+                plInternalHigh := swPH
+        if not na(plInternalHigh) and close > plInternalHigh
+            plProtected := false
+            if not na(plLine)
+                line.delete(plLine)
+                label.delete(plLbl)
+                plLine := na
+                plLbl  := na
+
+    // ── Protection Range Rule: PH protected up to the last internal low after it ──
+    if phProtected
+        if not na(swPL)
+            pivotBarIL = bar_index - plphPivotLen
+            if pivotBarIL > phBar
+                phInternalLow := swPL
+        if not na(phInternalLow) and close < phInternalLow
+            phProtected := false
+            if not na(phLine)
+                line.delete(phLine)
+                label.delete(phLbl)
+                phLine := na
+                phLbl  := na
+
+// ============================================================================
+// STAGE 4: Liquidity Pool Mapping
+// ============================================================================
+// External liquidity = the higher-timeframe pools traders sweep on the way to
+// a target: PDH/PDL, PWH/PWL, and the 4 session highs/lows (already drawn
+// above). Internal liquidity = PLC/PHC/PL/PH (Stage 3), the nearer-term
+// levels inside the current range - already visible on the chart, not
+// re-tracked here.
+//
+// Each external level is tracked as "swept" once price trades through it -
+// that status resets whenever the level itself updates (new day/week/
+// session). "No pending liquidity above/below" means every tracked external
+// level on that side has already been swept, i.e. there's no higher-timeframe
+// draw left in that direction.
+//
+// RS distance-realism: "if RS is around 400 ticks away it's realistic, but
+// if it's 1,800 ticks away it's not going to be hit in the AM session" -
+// measured from the 9:30 Open (NYAM Opening Price) per the notes' own example.
+//
+// Low Resistance Liquidity (LRL): "price gradually trades in a direction
+// while forming multiple highs or lows along the way" instead of one
+// aggressive displacement candle - implemented as 3 consecutive confirmed
+// swing lows each higher than the last (grinding up) or 3 consecutive swing
+// highs each lower than the last (grinding down), AND only while there's
+// still a live (unswept) liquidity target on that side - otherwise normal
+// chop produces the same 3-pivot staircase with no actual draw behind it.
+
+gLiq         = "Liquidity Map"
+showLiqTable = input.bool(true, "Show Liquidity Table", group = gLiq)
+rsMaxRealisticTicks = input.int(1000, "Max realistic RS distance from 9:30 Open (ticks)", minval = 1, group = gLiq)
+lrlPivotLen  = input.int(3, "LRL swing pivot length (bars each side)", minval = 1, group = gLiq)
+
+f_sweptTracker(level, isHigh) =>
+    var float lastLevel = na
+    var bool  swept     = false
+    if not na(level) and level != lastLevel
+        lastLevel := level
+        swept     := false
+    if not swept and not na(level)
+        swept := isHigh ? high >= level : low <= level
+    swept
+
+pdhSwept     = f_sweptTracker(pdh, true)
+pdlSwept     = f_sweptTracker(pdl, false)
+pwhSwept     = f_sweptTracker(pwh, true)
+pwlSwept     = f_sweptTracker(pwl, false)
+asiaHSwept   = f_sweptTracker(asiaH, true)
+asiaLSwept   = f_sweptTracker(asiaL, false)
+londonHSwept = f_sweptTracker(londonH, true)
+londonLSwept = f_sweptTracker(londonL, false)
+nyamHSwept   = f_sweptTracker(nyamH, true)
+nyamLSwept   = f_sweptTracker(nyamL, false)
+nypmHSwept   = f_sweptTracker(nypmH, true)
+nypmLSwept   = f_sweptTracker(nypmL, false)
+
+liqLevels = array.new<float>()
+liqSwept  = array.new<bool>()
+array.push(liqLevels, pdh)
+array.push(liqSwept, pdhSwept)
+array.push(liqLevels, pdl)
+array.push(liqSwept, pdlSwept)
+array.push(liqLevels, pwh)
+array.push(liqSwept, pwhSwept)
+array.push(liqLevels, pwl)
+array.push(liqSwept, pwlSwept)
+array.push(liqLevels, asiaH)
+array.push(liqSwept, asiaHSwept)
+array.push(liqLevels, asiaL)
+array.push(liqSwept, asiaLSwept)
+array.push(liqLevels, londonH)
+array.push(liqSwept, londonHSwept)
+array.push(liqLevels, londonL)
+array.push(liqSwept, londonLSwept)
+array.push(liqLevels, nyamH)
+array.push(liqSwept, nyamHSwept)
+array.push(liqLevels, nyamL)
+array.push(liqSwept, nyamLSwept)
+array.push(liqLevels, nypmH)
+array.push(liqSwept, nypmHSwept)
+array.push(liqLevels, nypmL)
+array.push(liqSwept, nypmLSwept)
+
+noPendingAbove = true
+noPendingBelow = true
+for i = 0 to array.size(liqLevels) - 1
+    lvl = array.get(liqLevels, i)
+    swp = array.get(liqSwept, i)
+    if not na(lvl) and not swp
+        if lvl > close
+            noPendingAbove := false
+        if lvl < close
+            noPendingBelow := false
+
+// ── RS distance-realism ──────────────────────────────────────────────
+rsDistanceTicks = (not na(rsPrice) and not na(open0930)) ? math.abs(rsPrice - open0930) / tick : na
+rsRealistic     = not na(rsDistanceTicks) and rsDistanceTicks <= rsMaxRealisticTicks
+
+// ── Low Resistance Liquidity (LRL) ──────────────────────────────────────────────
+lrlSwPH = ta.pivothigh(high, lrlPivotLen, lrlPivotLen)
+lrlSwPL = ta.pivotlow(low, lrlPivotLen, lrlPivotLen)
+
+var float lrlLow1  = na
+var float lrlLow2  = na
+var float lrlLow3  = na
+var float lrlHigh1 = na
+var float lrlHigh2 = na
+var float lrlHigh3 = na
+
+if not na(lrlSwPL)
+    lrlLow1 := lrlLow2
+    lrlLow2 := lrlLow3
+    lrlLow3 := lrlSwPL
+
+if not na(lrlSwPH)
+    lrlHigh1 := lrlHigh2
+    lrlHigh2 := lrlHigh3
+    lrlHigh3 := lrlSwPH
+
+lrlStaircaseBull = not na(lrlLow1) and not na(lrlLow2) and not na(lrlLow3) and lrlLow1 < lrlLow2 and lrlLow2 < lrlLow3
+lrlStaircaseBear = not na(lrlHigh1) and not na(lrlHigh2) and not na(lrlHigh3) and lrlHigh1 > lrlHigh2 and lrlHigh2 > lrlHigh3
+
+// A staircase alone isn't enough - normal chop produces 3 ascending/descending
+// pivots on its own. The notes describe LRL as the market grinding TOWARD a
+// liquidity pool, so it only counts if there's still a live (unswept) target
+// on that side - an external level, or the nearer-term PHC/PH (bullish) /
+// PLC/PL (bearish) draw.
+bullTargetAbove = not noPendingAbove or (not na(phcPrice) and phcPrice > close) or (not na(phPrice) and phPrice > close)
+bearTargetBelow = not noPendingBelow or (not na(plcPrice) and plcPrice < close) or (not na(plPrice) and plPrice < close)
+
+lrlBull = lrlStaircaseBull and bullTargetAbove
+lrlBear = lrlStaircaseBear and bearTargetBelow
+
+var int lastLRLBullBar = na
+var int lastLRLBearBar = na
+
+if not na(lrlSwPL) and lrlBull
+    label.new(bar_index - lrlPivotLen, lrlLow3, "LRL", style = label.style_label_up, color = color.new(color.aqua, 100), textcolor = color.aqua, size = size.tiny)
+    lastLRLBullBar := bar_index
+
+if not na(lrlSwPH) and lrlBear
+    label.new(bar_index - lrlPivotLen, lrlHigh3, "LRL", style = label.style_label_down, color = color.new(color.aqua, 100), textcolor = color.aqua, size = size.tiny)
+    lastLRLBearBar := bar_index
+
+var table liqTable = table.new(position.top_right, 2, 3, bgcolor = color.new(color.black, 20), border_width = 1, border_color = color.gray)
+
+if showLiqTable and barstate.islast
+    table.cell(liqTable, 0, 0, "Liquidity Above", text_color = color.white, bgcolor = color.new(color.gray, 40))
+    table.cell(liqTable, 1, 0, noPendingAbove ? "None Pending" : "Pending", text_color = color.white, bgcolor = noPendingAbove ? color.new(color.red, 40) : color.new(color.green, 40))
+    table.cell(liqTable, 0, 1, "Liquidity Below", text_color = color.white, bgcolor = color.new(color.gray, 40))
+    table.cell(liqTable, 1, 1, noPendingBelow ? "None Pending" : "Pending", text_color = color.white, bgcolor = noPendingBelow ? color.new(color.red, 40) : color.new(color.green, 40))
+    table.cell(liqTable, 0, 2, "RS Distance", text_color = color.white, bgcolor = color.new(color.gray, 40))
+    table.cell(liqTable, 1, 2, na(rsDistanceTicks) ? "-" : (rsRealistic ? "Realistic (" + str.tostring(math.round(rsDistanceTicks)) + "t)" : "Too Far (" + str.tostring(math.round(rsDistanceTicks)) + "t)"), text_color = color.white, bgcolor = na(rsDistanceTicks) ? color.new(color.gray, 60) : (rsRealistic ? color.new(color.green, 40) : color.new(color.red, 40)))
+
+// ============================================================================
+// STAGE 5a: Change of Structure (CoS) & Turtle Soup
+// ============================================================================
+// Change of Structure: "price closes through a swing high or swing low,
+// showing a potential shift in direction." Fires once per swing point (the
+// tracked swing resets after it breaks, so it doesn't refire every bar
+// while price stays beyond it).
+//
+// Turtle Soup: "price slightly edges a point of interest creating a short
+// term high or low, then trades through that short term high or low and
+// into the point of interest" - implemented as a marginal poke (>=1 tick)
+// beyond a short-term swing high/low that reclaims back through it within
+// tsConfirmBars bars.
+//
+// Both are standalone confirmation-layer signals for now (Stage 5b wires
+// them into the full 5-step entry sequence with what's already built).
+
+gCOS          = "Change of Structure & Turtle Soup"
+useCOS        = input.bool(true, "Show Change of Structure (CoS)", group = gCOS)
+cosPivotLen   = input.int(5, "CoS swing pivot length (bars each side)", minval = 1, group = gCOS)
+useTS         = input.bool(true, "Show Turtle Soup", group = gCOS)
+tsPivotLen    = input.int(2, "Turtle Soup short-term pivot length (bars each side)", minval = 1, group = gCOS)
+tsSweepTicks  = input.int(1, "Min poke beyond short-term high/low (ticks)", minval = 0, group = gCOS)
+tsConfirmBars = input.int(3, "Max bars to reclaim after the poke", minval = 1, group = gCOS)
+
+// ── Change of Structure ──────────────────────────────────────────────
+cosSwPH = ta.pivothigh(high, cosPivotLen, cosPivotLen)
+cosSwPL = ta.pivotlow(low, cosPivotLen, cosPivotLen)
+
+var float cosLastSwingH = na
+var float cosLastSwingL = na
+
+cosBull = useCOS and not na(cosLastSwingH) and close > cosLastSwingH
+cosBear = useCOS and not na(cosLastSwingL) and close < cosLastSwingL
+
+if cosBull
+    label.new(bar_index, low, "CoS", style = label.style_label_up, color = color.new(color.lime, 100), textcolor = color.lime, size = size.tiny)
+if cosBear
+    label.new(bar_index, high, "CoS", style = label.style_label_down, color = color.new(color.red, 100), textcolor = color.red, size = size.tiny)
+
+// update after the break-check: consume if just broken, else track the newest pivot
+if cosBull
+    cosLastSwingH := na
+else if not na(cosSwPH)
+    cosLastSwingH := cosSwPH
+
+if cosBear
+    cosLastSwingL := na
+else if not na(cosSwPL)
+    cosLastSwingL := cosSwPL
+
+// ── Turtle Soup ──────────────────────────────────────────────
+tsSwPH = ta.pivothigh(high, tsPivotLen, tsPivotLen)
+tsSwPL = ta.pivotlow(low, tsPivotLen, tsPivotLen)
+
+var float tsLastSTH = na
+var float tsLastSTL = na
+
+var bool  tsBullArmed = false
+var float tsBullSTL   = na
+var int   tsBullBar   = na
+
+var bool  tsBearArmed = false
+var float tsBearSTH   = na
+var int   tsBearBar   = na
+
+// arm: this bar pokes marginally beyond the tracked short-term high/low -
+// per the notes, that poke ITSELF "creates a short term high or low" - so
+// the level to watch for a reclaim through is THIS BAR's own extreme, not
+// the old pre-poke level.
+if useTS and not na(tsLastSTL) and low <= tsLastSTL - tsSweepTicks * tick and not tsBullArmed
+    tsBullArmed := true
+    tsBullSTL   := low
+    tsBullBar   := bar_index
+
+if useTS and not na(tsLastSTH) and high >= tsLastSTH + tsSweepTicks * tick and not tsBearArmed
+    tsBearArmed := true
+    tsBearSTH   := high
+    tsBearBar   := bar_index
+
+// update the trackers for future bars
+if not na(tsSwPH)
+    tsLastSTH := tsSwPH
+if not na(tsSwPL)
+    tsLastSTL := tsSwPL
+
+// confirm (reclaim, strictly on a later bar - same-bar close is always on
+// the far side of its own wick, which isn't a real reversal) or expire
+var int lastTSBullBar = na
+var int lastTSBearBar = na
+
+if tsBullArmed and bar_index > tsBullBar
+    if close > tsBullSTL
+        label.new(bar_index, low, "TS", style = label.style_label_up, color = color.new(color.teal, 100), textcolor = color.teal, size = size.tiny)
+        lastTSBullBar := bar_index
+        tsBullArmed := false
+    else if bar_index - tsBullBar > tsConfirmBars
+        tsBullArmed := false
+
+if tsBearArmed and bar_index > tsBearBar
+    if close < tsBearSTH
+        label.new(bar_index, high, "TS", style = label.style_label_down, color = color.new(color.red, 100), textcolor = color.red, size = size.tiny)
+        lastTSBearBar := bar_index
+        tsBearArmed := false
+    else if bar_index - tsBearBar > tsConfirmBars
+        tsBearArmed := false
+
+// ============================================================================
+// STAGE 5b: Limit vs. Confirmation Signal
+// ============================================================================
+// Group Class 4's rule for when a limit order is justified: "the default
+// should always be to wait for confirmation unless both of the following
+// are met: (1) a clear low resistance liquidity run into the level, (2) a
+// short-term high or low forming just before the level. If either is
+// missing, wait for confirmation. There are no exceptions." Combined with
+// Group Class 2's limit-order conditions (aligned liquidity target + correct
+// side of opening prices).
+//
+// LIMIT signal: price is touching a POI (OB/RB/iRB/Breaker/PLC/PL) AND
+// liquidity is aligned in that direction AND LRL fired recently AND Turtle
+// Soup fired recently.
+// WAIT signal: POI + aligned liquidity, but LRL or TS missing - needs
+// CoS/IFVG confirmation + retracement before entering (Stage 5c, not yet
+// built - this pass only covers the limit-vs-wait decision, not the full
+// confirmation entry sequence).
+//
+// Known simplification: "LRL/TS fired recently" checks TIME (within N bars),
+// not that it happened at THIS specific POI's price - fine most of the time
+// since they tend to cluster near the same move, but not a strict guarantee.
+// This also only evaluates the CURRENT chart's timeframe, not the notes'
+// full 4H-to-5m cross-timeframe refinement - read it as "does this qualify
+// on the timeframe I'm looking at right now."
+
+gSignal           = "Entry Signal"
+useSignal         = input.bool(true, "Show Limit/Wait Signal", group = gSignal)
+signalRecentBars  = input.int(15, "Max bars for LRL/TS to still count as \"recent\"", minval = 1, group = gSignal)
+signalOpensNeeded = input.int(3, "Min opening prices on correct side (of 6)", minval = 0, maxval = 6, group = gSignal)
+
+f_touchingBull(lo, hi) =>
+    t = false
+    if not na(bullOBBox) and lo <= bullOBTopV and hi >= bullOBBotV
+        t := true
+    if not na(bullBRKBox) and lo <= bullBRKTop and hi >= bullBRKBot
+        t := true
+    if array.size(bullRBZones) > 0
+        for idx = 0 to array.size(bullRBZones) - 1
+            z = array.get(bullRBZones, idx)
+            if lo <= z.top and hi >= z.bot
+                t := true
+    if array.size(bullIRBZones) > 0
+        for idx = 0 to array.size(bullIRBZones) - 1
+            z = array.get(bullIRBZones, idx)
+            if lo <= z.top and hi >= z.bot
+                t := true
+    if not na(plPrice) and lo <= plPrice and hi >= plPrice
+        t := true
+    if not na(plcPrice) and lo <= plcPrice and hi >= plcPrice
+        t := true
+    t
+
+f_touchingBear(lo, hi) =>
+    t = false
+    if not na(bearOBBox) and lo <= bearOBTopV and hi >= bearOBBotV
+        t := true
+    if not na(bearBRKBox) and lo <= bearBRKTop and hi >= bearBRKBot
+        t := true
+    if array.size(bearRBZones) > 0
+        for idx = 0 to array.size(bearRBZones) - 1
+            z = array.get(bearRBZones, idx)
+            if lo <= z.top and hi >= z.bot
+                t := true
+    if array.size(bearIRBZones) > 0
+        for idx = 0 to array.size(bearIRBZones) - 1
+            z = array.get(bearIRBZones, idx)
+            if lo <= z.top and hi >= z.bot
+                t := true
+    if not na(phPrice) and lo <= phPrice and hi >= phPrice
+        t := true
+    if not na(phcPrice) and lo <= phcPrice and hi >= phcPrice
+        t := true
+    t
+
+touchingBullNow = useSignal and f_touchingBull(low, high)
+touchingBearNow = useSignal and f_touchingBear(low, high)
+
+bullOpensCount = (not na(trueDayOpen) and close < trueDayOpen ? 1 : 0) + (not na(open0830) and close < open0830 ? 1 : 0) + (not na(open0930) and close < open0930 ? 1 : 0) + (not na(open1330) and close < open1330 ? 1 : 0) + (not na(dailyOpen) and close < dailyOpen ? 1 : 0) + (not na(weeklyOpen) and close < weeklyOpen ? 1 : 0)
+bearOpensCount = (not na(trueDayOpen) and close > trueDayOpen ? 1 : 0) + (not na(open0830) and close > open0830 ? 1 : 0) + (not na(open0930) and close > open0930 ? 1 : 0) + (not na(open1330) and close > open1330 ? 1 : 0) + (not na(dailyOpen) and close > dailyOpen ? 1 : 0) + (not na(weeklyOpen) and close > weeklyOpen ? 1 : 0)
+
+// counts external liquidity (Stage 4) OR internal liquidity (PHC/PH above for
+// longs, PLC/PL below for shorts) as a valid draw - external-only missed
+// reversals back toward an internal level once every external pool had
+// already been swept
+bullLiquidityAligned = bullTargetAbove
+bearLiquidityAligned = bearTargetBelow
+
+bullLRLRecent = not na(lastLRLBullBar) and (bar_index - lastLRLBullBar) <= signalRecentBars
+bearLRLRecent = not na(lastLRLBearBar) and (bar_index - lastLRLBearBar) <= signalRecentBars
+bullTSRecent  = not na(lastTSBullBar) and (bar_index - lastTSBullBar) <= signalRecentBars
+bearTSRecent  = not na(lastTSBearBar) and (bar_index - lastTSBearBar) <= signalRecentBars
+
+bullQualifies = touchingBullNow and bullLiquidityAligned and bullOpensCount >= signalOpensNeeded
+bearQualifies = touchingBearNow and bearLiquidityAligned and bearOpensCount >= signalOpensNeeded
+
+bullLimitReady = bullQualifies and bullLRLRecent and bullTSRecent
+bearLimitReady = bearQualifies and bearLRLRecent and bearTSRecent
+
+// fire once per touch, not every bar while price sits inside the zone
+if bullQualifies and not touchingBullNow[1]
+    if bullLimitReady
+        label.new(bar_index, low, "LIMIT\nLONG", style = label.style_label_up, color = color.new(color.green, 20), textcolor = color.white, size = size.normal)
+    else
+        label.new(bar_index, low, "WAIT\n(long)", style = label.style_label_up, color = color.new(color.gray, 30), textcolor = color.white, size = size.small)
+
+if bearQualifies and not touchingBearNow[1]
+    if bearLimitReady
+        label.new(bar_index, high, "LIMIT\nSHORT", style = label.style_label_down, color = color.new(color.red, 20), textcolor = color.white, size = size.normal)
+    else
+        label.new(bar_index, high, "WAIT\n(short)", style = label.style_label_down, color = color.new(color.gray, 30), textcolor = color.white, size = size.small)
+
+// ============================================================================
+// STAGE 5c: Confirmation -> Retracement -> Entry
+// ============================================================================
+// For a WAIT signal: "wait for confirmation (IFVG or CoS), then wait for a
+// retracement into the discount (longs) / premium (shorts) of the newly
+// created range, then enter at the first PD-array within that area."
+//
+// Sequence once WAIT fires:
+//   1. Armed - watching for CoS or IFVG in the WAIT's direction.
+//   2. Confirmed - CoS/IFVG fired; the "new range" is [WAIT origin, the
+//      extreme reached at confirmation]; CE splits it into discount/premium.
+//   3. Entry - price retraces into the discount/premium half AND touches a
+//      PD-array (OB/RB/iRB/Breaker/PLC/PL) there.
+// Expires (resets, no entry) if it drags past maxConfirmBars without
+// confirming, or past maxEntryBars waiting for the retracement, or if price
+// closes back through the WAIT origin (setup invalidated).
+
+gConfirm       = "Confirmation Entry (Stage 5c)"
+maxConfirmBars = input.int(40, "Max bars to wait for CoS/IFVG confirmation", minval = 1, group = gConfirm)
+maxEntryBars   = input.int(40, "Max bars to wait for retracement after confirmation", minval = 1, group = gConfirm)
+
+var bool  waitArmedBull    = false
+var float waitOriginBull   = na
+var int   waitBarBull      = na
+var bool  confirmedBull    = false
+var float confirmedExtBull = na
+var float rangeCEBull      = na
+var int   confirmedBarBull = na
+
+var bool  waitArmedBear    = false
+var float waitOriginBear   = na
+var int   waitBarBear      = na
+var bool  confirmedBear    = false
+var float confirmedExtBear = na
+var float rangeCEBear      = na
+var int   confirmedBarBear = na
+
+// arm on a fresh WAIT (not a LIMIT, that's already an immediate signal)
+if bullQualifies and not touchingBullNow[1] and not bullLimitReady
+    waitArmedBull  := true
+    waitOriginBull := low
+    waitBarBull    := bar_index
+    confirmedBull  := false
+
+if bearQualifies and not touchingBearNow[1] and not bearLimitReady
+    waitArmedBear  := true
+    waitOriginBear := high
+    waitBarBear    := bar_index
+    confirmedBear  := false
+
+// stage 1 -> 2: confirmation (CoS or IFVG)
+if waitArmedBull and not confirmedBull
+    if close < waitOriginBull
+        waitArmedBull := false
+    else if cosBull or ifvgBull
+        confirmedBull    := true
+        confirmedExtBull := high
+        rangeCEBull       := (waitOriginBull + high) / 2
+        confirmedBarBull  := bar_index
+        label.new(bar_index, high, "Confirmed", style = label.style_label_down, color = color.new(color.lime, 100), textcolor = color.lime, size = size.tiny)
+    else if bar_index - waitBarBull > maxConfirmBars
+        waitArmedBull := false
+
+if waitArmedBear and not confirmedBear
+    if close > waitOriginBear
+        waitArmedBear := false
+    else if cosBear or ifvgBear
+        confirmedBear    := true
+        confirmedExtBear := low
+        rangeCEBear       := (waitOriginBear + low) / 2
+        confirmedBarBear  := bar_index
+        label.new(bar_index, low, "Confirmed", style = label.style_label_up, color = color.new(color.red, 100), textcolor = color.red, size = size.tiny)
+    else if bar_index - waitBarBear > maxConfirmBars
+        waitArmedBear := false
+
+// stage 2 -> 3: retracement into discount/premium + PD-array touch = entry
+if confirmedBull
+    if close < waitOriginBull
+        confirmedBull := false
+        waitArmedBull := false
+    else if low <= rangeCEBull and f_touchingBull(low, high)
+        label.new(bar_index, low, "ENTRY\nLONG", style = label.style_label_up, color = color.new(color.green, 10), textcolor = color.white, size = size.normal)
+        confirmedBull := false
+        waitArmedBull := false
+    else if bar_index - confirmedBarBull > maxEntryBars
+        confirmedBull := false
+        waitArmedBull := false
+
+if confirmedBear
+    if close > waitOriginBear
+        confirmedBear := false
+        waitArmedBear := false
+    else if high >= rangeCEBear and f_touchingBear(low, high)
+        label.new(bar_index, high, "ENTRY\nSHORT", style = label.style_label_down, color = color.new(color.red, 10), textcolor = color.white, size = size.normal)
+        confirmedBear := false
+        waitArmedBear := false
+    else if bar_index - confirmedBarBear > maxEntryBars
+        confirmedBear := false
+        waitArmedBear := false
+
+// ── Bias Table ──────────────────────────────────────────────
+f_biasColor(ref) =>
+    na(ref) ? color.gray : close > ref ? color.green : color.red
+f_biasText(ref) =>
+    na(ref) ? "-" : close > ref ? "Above" : "Below"
+
+var table biasTable = table.new(position.top_left, 2, 12, bgcolor = color.new(color.black, 20), border_width = 1, border_color = color.gray)
+
+if showBiasTable and barstate.islast
+    refs = array.new<float>()
+    names = array.new<string>()
+    array.push(names, "Weekly Open")
+    array.push(refs, weeklyOpen)
+    array.push(names, "Daily Open")
+    array.push(refs, dailyOpen)
+    array.push(names, "True Day Open")
+    array.push(refs, trueDayOpen)
+    array.push(names, "8:30 Open")
+    array.push(refs, open0830)
+    array.push(names, "9:30 Open")
+    array.push(refs, open0930)
+    array.push(names, "13:30 Open")
+    array.push(refs, open1330)
+    array.push(names, "PDH")
+    array.push(refs, pdh)
+    array.push(names, "PDL")
+    array.push(refs, pdl)
+    array.push(names, "PWH")
+    array.push(refs, pwh)
+    array.push(names, "PWL")
+    array.push(refs, pwl)
+    array.push(names, "RS")
+    array.push(refs, rsPrice)
+
+    table.cell(biasTable, 0, 0, "Level", text_color = color.white, bgcolor = color.new(color.gray, 40))
+    table.cell(biasTable, 1, 0, "Price vs", text_color = color.white, bgcolor = color.new(color.gray, 40))
+    for i = 0 to array.size(names) - 1
+        ref = array.get(refs, i)
+        table.cell(biasTable, 0, i + 1, array.get(names, i), text_color = color.white)
+        table.cell(biasTable, 1, i + 1, f_biasText(ref), text_color = f_biasColor(ref))
