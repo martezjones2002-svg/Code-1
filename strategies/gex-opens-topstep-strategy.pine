@@ -1,0 +1,214 @@
+//@version=6
+strategy("GEX + Opens Bias — Topstep 50K", shorttitle = "GEX-Opens-TS50K", overlay = true,
+     initial_capital = 50000, default_qty_type = strategy.fixed, default_qty_value = 1,
+     commission_type = strategy.commission.cash_per_contract, commission_value = 4.5,
+     slippage = 1, calc_on_every_tick = true, process_orders_on_close = false)
+
+// Built for 5m/15m charts on YM and RTY (position sizing uses syminfo.pointvalue,
+// so it auto-adjusts for full-size or micro contracts on either symbol).
+//
+// IMPORTANT LIMITATION: the GEX levels below (Gamma Flip, Call Wall, Put Wall) are
+// manual daily inputs — TradingView has no native options/dealer-gamma data feed.
+// Because input.float() values are constant across the whole chart, the Strategy
+// Tester backtest will apply TODAY's typed-in levels to every historical bar, not
+// the real historical GEX for each day. That means backtest stats involving GEX
+// signals are NOT a valid historical performance estimate — treat this strategy as
+// a live/forward-testing tool (update the GEX inputs every morning) rather than a
+// backtestable one, unless GEX-gated entries are disabled below.
+
+// ── Account / Risk (Topstep 50K Combine defaults — confirm against your real account) ──
+g_risk = "Account / Risk"
+dailyLossLimit  = input.float(1000, "Daily Loss Limit ($)", group = g_risk)
+maxTrailingDD   = input.float(2000, "Max Trailing Drawdown ($)", group = g_risk)
+profitTarget    = input.float(3000, "Profit Target ($)", group = g_risk)
+dailyLossBuffer = input.float(85, "Stop new entries at % of daily loss limit used", minval = 50, maxval = 100, group = g_risk) / 100
+ddBuffer        = input.float(85, "Stop new entries at % of max drawdown used", minval = 50, maxval = 100, group = g_risk) / 100
+riskPerTradePct = input.float(10, "Risk per trade (% of remaining cushion)", minval = 1, maxval = 50, group = g_risk) / 100
+maxContracts    = input.int(5, "Max contracts per trade", minval = 1, group = g_risk)
+
+// ── Session ──
+g_sess       = "Session"
+tz           = input.string("America/New_York", "Reference timezone", group = g_sess)
+sessionInput = input.session("0930-1600", "Trading window", group = g_sess)
+flattenEOD   = input.bool(true, "Flatten all positions at session end", group = g_sess)
+
+// ── Opens Bias ──
+g_opens        = "Opens Bias"
+useWeeklyOpen  = input.bool(true, "Use Weekly Open bias", group = g_opens)
+useDailyOpen   = input.bool(true, "Use Daily Open bias", group = g_opens)
+useTrueDayOpen = input.bool(true, "Use True Day Open bias", group = g_opens)
+trueDayHour    = input.int(0, "True Day Open hour (in reference timezone)", minval = 0, maxval = 23, group = g_opens)
+
+// ── GEX Levels (update these every morning from your GEX data provider) ──
+g_gex          = "GEX Levels (manual daily input)"
+gammaFlip      = input.float(0, "Gamma Flip level (0 = unset)", group = g_gex)
+callWall       = input.float(0, "Call Wall level (0 = unset)", group = g_gex)
+putWall        = input.float(0, "Put Wall level (0 = unset)", group = g_gex)
+maxPain        = input.float(0, "Max Pain level (0 = unset, display only)", group = g_gex)
+useGammaRegime = input.bool(true, "Gate regime (chop/trend) by Gamma Flip", group = g_gex)
+
+// ── Entry Mode ──
+g_mode          = "Entry Mode"
+allowChopFade   = input.bool(true, "Allow chop / mean-reversion wall-fade entries", group = g_mode)
+allowTrendBreak = input.bool(true, "Allow trend / breakout entries", group = g_mode)
+
+// ── Execution ──
+g_exec        = "Execution"
+atrLen        = input.int(14, "ATR length (trend stops/targets)", group = g_exec)
+atrMultStop   = input.float(1.5, "Trend stop = ATR x", group = g_exec)
+atrMultTarget = input.float(3.0, "Trend target = ATR x", group = g_exec)
+wallStopTicks = input.int(20, "Chop stop = wall +/- X ticks", group = g_exec)
+rrChop        = input.float(2.0, "Chop target = stop distance x R", group = g_exec)
+
+tick = syminfo.mintick
+atr  = ta.atr(atrLen)
+
+// ── Opens calculation (timezone-aware, works correctly across full history) ──
+dom = dayofmonth(time, tz)
+woy = weekofyear(time, tz)
+hr  = hour(time, tz)
+
+newDay     = ta.change(dom) != 0
+newWeek    = ta.change(woy) != 0
+newTrueDay = hr == trueDayHour and hr[1] != trueDayHour
+
+var float weeklyOpen  = na
+var float dailyOpen   = na
+var float trueDayOpen = na
+
+if newWeek
+    weeklyOpen := open
+if newDay
+    dailyOpen := open
+if newTrueDay
+    trueDayOpen := open
+
+weeklyBias  = na(weeklyOpen) ? 0 : close > weeklyOpen ? 1 : -1
+dailyBias   = na(dailyOpen) ? 0 : close > dailyOpen ? 1 : -1
+trueDayBias = na(trueDayOpen) ? 0 : close > trueDayOpen ? 1 : -1
+
+biasScore = (useWeeklyOpen ? weeklyBias : 0) + (useDailyOpen ? dailyBias : 0) + (useTrueDayOpen ? trueDayBias : 0)
+biasCount = (useWeeklyOpen ? 1 : 0) + (useDailyOpen ? 1 : 0) + (useTrueDayOpen ? 1 : 0)
+bullishBias = biasCount > 0 and biasScore == biasCount
+bearishBias = biasCount > 0 and biasScore == -biasCount
+
+// ── Regime ──
+haveGammaFlip  = gammaFlip != 0
+regimeChop     = useGammaRegime and haveGammaFlip and close > gammaFlip
+regimeTrend    = useGammaRegime and haveGammaFlip and close <= gammaFlip
+noRegimeFilter = not useGammaRegime or not haveGammaFlip
+
+// ── Session window ──
+inSession    = not na(time(timeframe.period, sessionInput, tz))
+sessionEnded = inSession[1] and not inSession
+
+// ── Risk tracking ──
+var float sessionStartEquity = na
+var float peakEquity = na
+
+if newDay or na(sessionStartEquity)
+    sessionStartEquity := strategy.equity
+if na(peakEquity)
+    peakEquity := strategy.equity
+peakEquity := math.max(peakEquity, strategy.equity)
+
+dailyPnL    = strategy.equity - sessionStartEquity
+trailingDD  = peakEquity - strategy.equity
+totalPnL    = strategy.equity - strategy.initial_capital
+
+dailyLossHalt  = dailyPnL <= -(dailyLossLimit * dailyLossBuffer)
+trailingDDHalt = trailingDD >= (maxTrailingDD * ddBuffer)
+targetHit      = totalPnL >= profitTarget
+tradingHalted  = dailyLossHalt or trailingDDHalt or targetHit
+
+riskDollarsAvail() =>
+    ddCushion = maxTrailingDD * ddBuffer - trailingDD
+    dlCushion = dailyLossLimit * dailyLossBuffer + dailyPnL
+    cushion = math.min(ddCushion, dlCushion)
+    math.max(cushion, 0.0) * riskPerTradePct
+
+calcContracts(stopDistPoints) =>
+    riskDollars = riskDollarsAvail()
+    qty = stopDistPoints <= 0 or riskDollars <= 0 ? 0.0 : math.floor(riskDollars / (stopDistPoints * syminfo.pointvalue))
+    int(math.min(maxContracts, qty))
+
+// ── Entry logic ──
+longCondition = false
+shortCondition = false
+stopDist = 0.0
+stopPrice = 0.0
+targetPrice = 0.0
+
+if not tradingHalted and inSession
+    if (regimeChop or noRegimeFilter) and allowChopFade
+        chopShort = callWall != 0 and high >= callWall and close < callWall
+        chopLong  = putWall != 0 and low <= putWall and close > putWall
+        if chopShort and not bullishBias
+            shortCondition := true
+            stopPrice := callWall + wallStopTicks * tick
+            stopDist := stopPrice - close
+            targetPrice := close - stopDist * rrChop
+        if chopLong and not bearishBias
+            longCondition := true
+            stopPrice := putWall - wallStopTicks * tick
+            stopDist := close - stopPrice
+            targetPrice := close + stopDist * rrChop
+    if regimeTrend and allowTrendBreak
+        trendLong  = callWall != 0 and ta.crossover(close, callWall) and bullishBias
+        trendShort = putWall != 0 and ta.crossunder(close, putWall) and bearishBias
+        if trendLong
+            longCondition := true
+            stopDist := atrMultStop * atr
+            stopPrice := close - stopDist
+            targetPrice := close + atrMultTarget * atr
+        if trendShort
+            shortCondition := true
+            stopDist := atrMultStop * atr
+            stopPrice := close + stopDist
+            targetPrice := close - atrMultTarget * atr
+
+qty = calcContracts(stopDist)
+
+if longCondition and qty >= 1 and strategy.position_size <= 0
+    strategy.entry("Long", strategy.long, qty = qty)
+    strategy.exit("Long Exit", "Long", stop = stopPrice, limit = targetPrice)
+
+if shortCondition and qty >= 1 and strategy.position_size >= 0
+    strategy.entry("Short", strategy.short, qty = qty)
+    strategy.exit("Short Exit", "Short", stop = stopPrice, limit = targetPrice)
+
+if tradingHalted and strategy.position_size != 0
+    strategy.close_all(comment = targetHit ? "Target Hit" : "Risk Halt")
+
+if flattenEOD and sessionEnded and strategy.position_size != 0
+    strategy.close_all(comment = "EOD Flatten")
+
+// ── Plots ──
+plot(useWeeklyOpen ? weeklyOpen : na, "Weekly Open", color.blue, 1, plot.style_stepline)
+plot(useDailyOpen ? dailyOpen : na, "Daily Open", color.orange, 1, plot.style_stepline)
+plot(useTrueDayOpen ? trueDayOpen : na, "True Day Open", color.purple, 1, plot.style_stepline)
+plot(callWall != 0 ? callWall : na, "Call Wall", color.red, 2)
+plot(putWall != 0 ? putWall : na, "Put Wall", color.green, 2)
+plot(gammaFlip != 0 ? gammaFlip : na, "Gamma Flip", color.yellow, 2)
+plot(maxPain != 0 ? maxPain : na, "Max Pain", color.gray, 1)
+
+// ── Status table ──
+var table riskTable = table.new(position.top_right, 2, 8, border_width = 1)
+if barstate.islast
+    table.cell(riskTable, 0, 0, "Metric", bgcolor = color.gray, text_color = color.white)
+    table.cell(riskTable, 1, 0, "Value", bgcolor = color.gray, text_color = color.white)
+    table.cell(riskTable, 0, 1, "Daily P&L")
+    table.cell(riskTable, 1, 1, str.tostring(dailyPnL, "#.##"), text_color = dailyPnL >= 0 ? color.green : color.red)
+    table.cell(riskTable, 0, 2, "Daily Loss Limit Used")
+    table.cell(riskTable, 1, 2, str.tostring(dailyPnL <= 0 ? -dailyPnL / dailyLossLimit * 100 : 0, "#.#") + "%")
+    table.cell(riskTable, 0, 3, "Trailing Drawdown")
+    table.cell(riskTable, 1, 3, str.tostring(trailingDD, "#.##"))
+    table.cell(riskTable, 0, 4, "Max DD Used")
+    table.cell(riskTable, 1, 4, str.tostring(trailingDD / maxTrailingDD * 100, "#.#") + "%")
+    table.cell(riskTable, 0, 5, "Total P&L")
+    table.cell(riskTable, 1, 5, str.tostring(totalPnL, "#.##"))
+    table.cell(riskTable, 0, 6, "Profit Target Progress")
+    table.cell(riskTable, 1, 6, str.tostring(totalPnL / profitTarget * 100, "#.#") + "%")
+    table.cell(riskTable, 0, 7, "Status")
+    table.cell(riskTable, 1, 7, tradingHalted ? (targetHit ? "TARGET HIT" : "HALTED") : "ACTIVE",
+         text_color = tradingHalted ? (targetHit ? color.lime : color.red) : color.green)
